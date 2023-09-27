@@ -740,7 +740,8 @@ class FlashCausalLM(Model):
     def warmup(self, batch: FlashCausalLMBatch):
         global CACHE_MANAGER
 
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         try:
             CACHE_MANAGER = CacheManager(
                 batch.blocks,
@@ -756,8 +757,8 @@ class FlashCausalLM(Model):
                 f"Not enough memory to handle {len(batch.input_ids)} prefill tokens. "
                 f"You need to decrease `--max-batch-prefill-tokens`"
             ) from e
-
-        torch.cuda.synchronize(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(self.device)
 
         # Inspired by the original implementation in [vllm](https://github.com/vllm-project/vllm)
         # Calculate the number of blocks that can be allocated with the free memory
@@ -765,12 +766,16 @@ class FlashCausalLM(Model):
         cache_block_size = BLOCK_SIZE * self.num_kv_heads * self.head_size
         total_cache_size = self.num_layers * cache_block_size * 2 * dtype_size
 
-        total_free_memory, _ = torch.cuda.mem_get_info(self.device)
-        total_gpu_memory = torch.cuda.get_device_properties(self.device).total_memory
+        if torch.cuda.is_available():
+            total_free_memory, _ = torch.cuda.mem_get_info(self.device)
+            total_gpu_memory = torch.cuda.get_device_properties(self.device).total_memory
 
-        free_memory = max(
-            0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory
-        )
+            free_memory = max(
+                0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory
+            )
+        else:
+            # 25G in cpu?
+            free_memory = 2500000
 
         num_blocks = (
             int(free_memory // total_cache_size)
@@ -780,7 +785,8 @@ class FlashCausalLM(Model):
 
         del CACHE_MANAGER
         del batch
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         CACHE_MANAGER = CacheManager(
             num_blocks,

@@ -5,11 +5,12 @@ from torch import nn
 from transformers.activations import ACT2FN
 from typing import Optional, List, Tuple
 
-# vllm imports
-import vllm_cache_ops
-import vllm_attention_ops
+if torch.cuda.is_available():
+    # vllm imports
+    import vllm_cache_ops
+    import vllm_attention_ops
 
-from text_generation_server.utils.flash_attn import attention
+from text_generation_server.utils.flash_attn import attention, ref_reshape_and_cache, ref_single_query_cached_kv_attention
 from text_generation_server.utils.layers import (
     TensorParallelRowLinear,
     TensorParallelColumnLinear,
@@ -258,9 +259,12 @@ class FlashMQAttention(torch.nn.Module):
         query = query.view(-1, self.num_heads, self.head_size)
         key_value = key_value.view(-1, 2, 1, self.head_size)
 
-        vllm_cache_ops.reshape_and_cache(
-            key_value[:, 0], key_value[:, 1], kv_cache[0], kv_cache[1], slots
-        )
+        if torch.cuda.is_available():
+            vllm_cache_ops.reshape_and_cache(
+                key_value[:, 0], key_value[:, 1], kv_cache[0], kv_cache[1], slots
+            )
+        else:
+            ref_reshape_and_cache(key_value[:, 0], key_value[:, 1], kv_cache[0], kv_cache[1], slots)
 
         # output
         attn_output = torch.empty_like(query)
@@ -281,18 +285,28 @@ class FlashMQAttention(torch.nn.Module):
         else:
             # kv_cache[1] => [num_blocks, 1, head_size, block_size]
             block_size = kv_cache[1].shape[3]
-            vllm_attention_ops.single_query_cached_kv_attention(
-                attn_output,
-                query,
-                kv_cache[0],
-                kv_cache[1],
-                self.kv_head_mapping,
-                self.softmax_scale,
-                block_tables,
-                input_lengths,
-                block_size,
-                max_s,
-            )
+            if torch.cuda.is_available():
+                vllm_attention_ops.single_query_cached_kv_attention(
+                    attn_output,
+                    query,
+                    kv_cache[0],
+                    kv_cache[1],
+                    self.kv_head_mapping,
+                    self.softmax_scale,
+                    block_tables,
+                    input_lengths,
+                    block_size,
+                    max_s,
+                )
+            else:
+                ref_single_query_cached_kv_attention(
+                    attn_output,
+                    query,
+                    kv_cache[0],
+                    kv_cache[1],
+                    block_tables,
+                    input_lengths,
+                )
 
         return self.c_proj(attn_output.view(-1, self.num_heads * self.head_size))
 
