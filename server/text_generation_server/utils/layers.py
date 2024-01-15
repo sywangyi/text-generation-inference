@@ -541,7 +541,7 @@ try:
 
     class FastLayerNorm(nn.LayerNorm):
         def forward(self, hidden_states, residual=None):
-            if hidden_states.shape[-1] > 8192 or IS_ROCM_SYSTEM:
+            if hidden_states.shape[-1] > 8192 or not IS_CUDA_SYSTEM:
                 if residual is not None:
                     hidden_states += residual
                 residual = hidden_states
@@ -587,7 +587,7 @@ try:
             return cls(weight, eps)
 
         def forward(self, hidden_states, residual=None):
-            if hidden_states.shape[-1] > 8192:
+            if hidden_states.shape[-1] > 8192 or not (IS_CUDA_SYSTEM or IS_ROCM_SYSTEM):
                 if residual is not None:
                     hidden_states += residual
                 residual = hidden_states
@@ -714,9 +714,18 @@ try:
                 # Inplace operation, updating query and key.
                 pos_encoding_ops.rotary_embedding(query, key, head_size, cos, sin, True)
             else:
-                raise ValueError(
-                    "Your system seem to be not supported. Please check your install or open an issue at https://github.com/huggingface/text-generation-inference/issues with a clear reproduction."
-                )
+                rotary_dim = cos.shape[-1]
+                q1 = query[..., :rotary_dim]
+                q2 = query[..., rotary_dim : 2 * rotary_dim]
+                c = q1 * cos - q2 * sin
+                d = q1 * sin + q2 * cos
+                query.copy_(torch.cat([c,d],dim=-1))
+                k1 = key[..., :rotary_dim]
+                k2 = key[..., rotary_dim : 2 * rotary_dim]
+                c = k1 * cos - k2 * sin
+                d = k1 * sin + k2 * cos
+                key.copy_(torch.cat([c,d],dim=-1))
+
 
         @classmethod
         def static(cls, config, dim, base, device):

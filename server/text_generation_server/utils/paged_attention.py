@@ -1,10 +1,27 @@
 import torch
 
+from text_generation_server.utils.import_utils import IS_CUDA_SYSTEM, IS_ROCM_SYSTEM
 # vllm imports
-from vllm import cache_ops
-from vllm import attention_ops
+if IS_CUDA_SYSTEM or IS_ROCM_SYSTEM:
+    from vllm import cache_ops
+    from vllm import attention_ops
 
 _PARTITION_SIZE = 512
+
+
+
+def ref_reshape_and_cache(key, value, key_cache, value_cache, slots):
+    x = 16 // torch.tensor([], dtype=key.dtype).element_size()
+    num_key_value_heads = key.shape[-2]
+    head_size = key.shape[-1]
+    reshaped_key = key.reshape(-1, num_key_value_heads, head_size // x, x)
+    num_tokens = value.shape[0]
+    block_size = value_cache.shape[3]
+    for i in range(num_tokens):
+        block_idx = torch.div(slots[i], block_size, rounding_mode='floor')
+        block_offset = slots[i] % block_size
+        key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
+        value_cache[block_idx, :, :, block_offset] = value[i]
 
 
 def reshape_and_cache(
@@ -14,8 +31,51 @@ def reshape_and_cache(
     value_cache: torch.Tensor,
     slots: torch.Tensor,
 ):
-    cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slots)
+    if IS_CUDA_SYSTEM or IS_ROCM_SYSTEM:
+        cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slots)
+    else:
+        ref_reshape_and_cache(key, value, key_cache, value_cache, slots)
 
+
+def ref_attention(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    context_lens: torch.Tensor,
+) -> None:
+    num_heads = value_cache.shape[1]
+    head_size = value_cache.shape[2]
+    block_size = value_cache.shape[3]
+
+    num_input_tokens = query.shape[0]
+    for i in range(num_input_tokens):
+        q = query[i].unsqueeze(0)
+        block_table = block_tables[i]
+        context_len = int(context_lens[i])
+        keys = []
+        values = []
+        for j in range(context_len):
+            block_number = int(block_table[j // block_size])
+            block_offset = j % block_size
+
+            k = key_cache[block_number, :, :, block_offset, :]
+            k = k.reshape(num_heads, head_size)
+            keys.append(k)
+
+            v = value_cache[block_number, :, :, block_offset]
+            values.append(v)
+        keys = torch.stack(keys, dim=0)
+        values = torch.stack(values, dim=0)
+
+        scale = 1.0 / (head_size ** 0.5)
+        out = torch.nn.functional.scaled_dot_product_attention(q.view(1,-1,num_heads,head_size).transpose(1,2),
+                keys.view(1,-1,num_heads,head_size).transpose(1,2),
+                values.view(1,-1,num_heads,head_size).transpose(1,2),
+                attn_mask=None, dropout_p=0.0, is_causal=False)
+        out = out.view(num_heads, head_size)
+        output[i].copy_(out, non_blocking=True)
 
 def attention(
     out: torch.Tensor,
@@ -54,6 +114,16 @@ def attention(
     # V1 to avoid the overhead of reduction. Also, if the number of
     # sequences or heads is large, we use V1 since there is enough work
     # to parallelize.
+    if not (IS_CUDA_SYSTEM or IS_ROCM_SYSTEM):
+        return ref_attention(
+            out,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            input_lengths
+        )
+
     use_v1 = max_num_partitions == 1 or num_seqs * num_heads > 512
     if use_v1:
         attention_ops.paged_attention_v1(
