@@ -14,7 +14,7 @@ from text_generation_server.utils import (
     weight_files,
     Weights,
 )
-
+from text_generation_server.utils.import_utils import IS_XPU_SYSTEM
 tracer = trace.get_tracer(__name__)
 
 
@@ -31,10 +31,11 @@ class FlashNeoXSharded(FlashCausalLM):
         if torch.cuda.is_available():
             device = torch.device(f"cuda:{rank}")
             dtype = torch.float16 if dtype is None else dtype
+        elif IS_XPU_SYSTEM:
+            device = torch.device(f"xpu:{rank}")
+            dtype = torch.float16 if dtype is None else dtype
         else:
-            ##TODO XPU
-            device = torch.device(f"cpu")
-            dtype = torch.bfloat16 if dtype is None else dtype
+            raise NotImplementedError("FlashNeoX is only available on GPU")
 
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,

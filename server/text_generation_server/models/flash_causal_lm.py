@@ -30,7 +30,7 @@ from text_generation_server.utils import StoppingCriteria, HeterogeneousNextToke
 from text_generation_server.utils.dist import MEMORY_FRACTION
 
 tracer = trace.get_tracer(__name__)
-from text_generation_server.utils.import_utils import IS_CUDA_SYSTEM, IS_ROCM_SYSTEM
+from text_generation_server.utils.import_utils import IS_CUDA_SYSTEM, IS_ROCM_SYSTEM, IS_XPU_SYSTEM
 
 @dataclass
 class FlashCausalLMBatch(Batch):
@@ -681,6 +681,8 @@ class FlashCausalLM(Model):
     def warmup(self, batch: FlashCausalLMBatch):
         if IS_CUDA_SYSTEM or IS_ROCM_SYSTEM:
             torch.cuda.empty_cache()
+        elif IS_XPU_SYSTEM:
+            torch.xpu.empty_cache()
         try:
             cache_manager = set_cache_manager(
                 batch.blocks,
@@ -700,6 +702,8 @@ class FlashCausalLM(Model):
 
         if IS_CUDA_SYSTEM or IS_ROCM_SYSTEM:
             torch.cuda.synchronize(self.device)
+        elif IS_XPU_SYSTEM:
+            torch.xpu.synchronize(self.device)
 
         # Inspired by the original implementation in [vllm](https://github.com/vllm-project/vllm)
         # Calculate the number of blocks that can be allocated with the free memory
@@ -714,8 +718,11 @@ class FlashCausalLM(Model):
             free_memory = max(
                 0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory
             )
+        elif IS_XPU_SYSTEM:
+            total_gpu_memory = torch.xpu.get_device_properties(self.device).total_memory
+            free_memory = int(total_gpu_memory *0.5)
         else:
-            free_memory=2500000 ####TODO
+            raise NotImplementedError("FlashModel is only available on GPU")
 
         num_blocks = (
             int(free_memory // total_cache_size)
