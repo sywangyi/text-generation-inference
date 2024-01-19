@@ -1,7 +1,9 @@
 import torch
-
+from loguru import logger
 from text_generation_server.utils.import_utils import IS_CUDA_SYSTEM, IS_ROCM_SYSTEM
 # vllm imports
+# logger.info("is cuda: {}".format(IS_CUDA_SYSTEM))
+# logger.info("is amd: {}".format(IS_ROCM_SYSTEM))
 if IS_CUDA_SYSTEM or IS_ROCM_SYSTEM:
     from vllm import cache_ops
     from vllm import attention_ops
@@ -34,7 +36,8 @@ def reshape_and_cache(
     if IS_CUDA_SYSTEM or IS_ROCM_SYSTEM:
         cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slots)
     else:
-        ref_reshape_and_cache(key, value, key_cache, value_cache, slots)
+        # ref_reshape_and_cache(key, value, key_cache, value_cache, slots)
+        torch.xpu.reshape_and_cache(key, value, key_cache, value_cache, slots)
 
 
 def ref_attention(
@@ -115,14 +118,27 @@ def attention(
     # sequences or heads is large, we use V1 since there is enough work
     # to parallelize.
     if not (IS_CUDA_SYSTEM or IS_ROCM_SYSTEM):
-        return ref_attention(
+        return torch.xpu.paged_attention_v1(
             out,
             query,
             key_cache,
             value_cache,
+            kv_head_mapping,
+            softmax_scale,
             block_tables,
-            input_lengths
+            input_lengths,
+            block_size,
+            max_s,
+            None
         )
+        # return ref_attention(
+        #         out,
+        #         query,
+        #         key_cache,
+        #         value_cache,
+        #         block_tables,
+        #         input_lengths
+        #     )
 
     use_v1 = max_num_partitions == 1 or num_seqs * num_heads > 512
     if use_v1:

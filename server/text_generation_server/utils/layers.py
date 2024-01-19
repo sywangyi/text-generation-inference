@@ -714,17 +714,9 @@ try:
                 # Inplace operation, updating query and key.
                 pos_encoding_ops.rotary_embedding(query, key, head_size, cos, sin, True)
             else:
-                rotary_dim = cos.shape[-1]
-                q1 = query[..., :rotary_dim]
-                q2 = query[..., rotary_dim : 2 * rotary_dim]
-                c = q1 * cos - q2 * sin
-                d = q1 * sin + q2 * cos
-                query.copy_(torch.cat([c,d],dim=-1))
-                k1 = key[..., :rotary_dim]
-                k2 = key[..., rotary_dim : 2 * rotary_dim]
-                c = k1 * cos - k2 * sin
-                d = k1 * sin + k2 * cos
-                key.copy_(torch.cat([c,d],dim=-1))
+                sin = sin.repeat(1, 1, 2).expand(query.shape)
+                cos = cos.repeat(1, 1, 2).expand(query.shape)
+                torch.ops.torch_ipex.apply_rotary_embedding_half_qk(query, key, sin, cos, query, key)
 
 
         @classmethod
