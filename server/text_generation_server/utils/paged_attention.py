@@ -118,15 +118,17 @@ def attention(
     # sequences or heads is large, we use V1 since there is enough work
     # to parallelize.
     if not (IS_CUDA_SYSTEM or IS_ROCM_SYSTEM):
-        return torch.xpu.paged_attention_v1(
+        query = query.contiguous()
+        torch.xpu.synchronize()
+        return torch.xpu.IpexPaged_attention(
             out,
             query,
             key_cache,
             value_cache,
             kv_head_mapping,
-            softmax_scale,
             block_tables,
             input_lengths,
+            softmax_scale,
             block_size,
             max_s,
             None
