@@ -545,8 +545,9 @@ try:
                 if residual is not None:
                     hidden_states += residual
                 residual = hidden_states
-
-                return super(FastLayerNorm, self).forward(hidden_states), residual
+                out = torch.ops.torch_ipex.fast_layer_norm(hidden_states, self.normalized_shape, self.weight, self.bias, self.eps)
+                return out, residual
+                # return super(FastLayerNorm, self).forward(hidden_states), residual
             else:
                 (
                     normed_hidden_states,
@@ -591,18 +592,21 @@ try:
                 if residual is not None:
                     hidden_states += residual
                 residual = hidden_states
-
-                hidden_states = hidden_states.to(torch.float32)
-                variance = hidden_states.pow(2).mean(-1, keepdim=True)
-                hidden_states = hidden_states * torch.rsqrt(
-                    variance + self.variance_epsilon
+                out = torch.ops.torch_ipex.rms_norm(
+                    hidden_states, [hidden_states.size(-1)], self.weight, self.variance_epsilon
                 )
 
-                # convert into half-precision if necessary
-                if self.weight.dtype in [torch.float16, torch.bfloat16]:
-                    hidden_states = hidden_states.to(self.weight.dtype)
+                # hidden_states = hidden_states.to(torch.float32)
+                # variance = hidden_states.pow(2).mean(-1, keepdim=True)
+                # hidden_states = hidden_states * torch.rsqrt(
+                #     variance + self.variance_epsilon
+                # )
 
-                return self.weight * hidden_states, residual
+                # # convert into half-precision if necessary
+                # if self.weight.dtype in [torch.float16, torch.bfloat16]:
+                #     hidden_states = hidden_states.to(self.weight.dtype)
+
+                return out[0], residual
             elif IS_CUDA_SYSTEM:
                 # faster post attention rms norm
                 (

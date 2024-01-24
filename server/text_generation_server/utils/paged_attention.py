@@ -119,7 +119,6 @@ def attention(
     # to parallelize.
     if not (IS_CUDA_SYSTEM or IS_ROCM_SYSTEM):
         query = query.contiguous()
-        torch.xpu.synchronize()
         return torch.xpu.IpexPaged_attention(
             out,
             query,
