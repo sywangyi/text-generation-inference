@@ -18,7 +18,7 @@ except ImportError:
 from accelerate import init_empty_weights
 
 from text_generation_server.utils.gptq.quant_linear import QuantLinear
-from text_generation_server.utils.import_utils import IS_CUDA_SYSTEM, IS_ROCM_SYSTEM
+from text_generation_server.utils.import_utils import IS_CUDA_SYSTEM, IS_ROCM_SYSTEM, IS_XPU_SYSTEM
 from text_generation_server.utils.log import log_once
 
 HAS_AWQ = True
@@ -526,6 +526,7 @@ class TensorParallelEmbedding(nn.Module):
             input - self.min_id,
         )
         out = torch.nn.functional.embedding(input, self.weight)
+        print("collective size: ", out.size())
         if self.reduce and self.process_group.size() > 1:
             torch.distributed.all_reduce(out, group=self.process_group)
         return out
@@ -542,10 +543,13 @@ try:
     class FastLayerNorm(nn.LayerNorm):
         def forward(self, hidden_states, residual=None):
             if hidden_states.shape[-1] > 8192 or not IS_CUDA_SYSTEM:
+                import intel_extension_for_pytorch as ipex
                 if residual is not None:
                     hidden_states += residual
                 residual = hidden_states
-                out = torch.ops.torch_ipex.fast_layer_norm(hidden_states, self.normalized_shape, self.weight, self.bias, self.eps)
+                # out = torch.ops.torch_ipex.43_norm(hidden_states, self.normalized_shape, self.weight, self.bias, self.eps)
+                layernorm = ipex.llm.modules.FastLayerNorm(self.normalized_shape, self.eps, self.weight, self.bias)
+                out = layernorm(hidden_states)
                 return out, residual
                 # return super(FastLayerNorm, self).forward(hidden_states), residual
             else:
@@ -589,12 +593,15 @@ try:
 
         def forward(self, hidden_states, residual=None):
             if hidden_states.shape[-1] > 8192 or not (IS_CUDA_SYSTEM or IS_ROCM_SYSTEM):
+                import intel_extension_for_pytorch as ipex
                 if residual is not None:
                     hidden_states += residual
                 residual = hidden_states
-                out = torch.ops.torch_ipex.rms_norm(
-                    hidden_states, [hidden_states.size(-1)], self.weight, self.variance_epsilon
-                )
+                rmsnorm = ipex.llm.modules.RMSNorm([hidden_states.size(-1)], self.variance_epsilon, self.weight)
+                out = rmsnorm(hidden_states)
+                # out = torch.ops.torch_ipex.rms_norm(
+                #     hidden_states, [hidden_states.size(-1)], self.weight, self.variance_epsilon
+                # )
 
                 # hidden_states = hidden_states.to(torch.float32)
                 # variance = hidden_states.pow(2).mean(-1, keepdim=True)
@@ -606,7 +613,7 @@ try:
                 # if self.weight.dtype in [torch.float16, torch.bfloat16]:
                 #     hidden_states = hidden_states.to(self.weight.dtype)
 
-                return out[0], residual
+                return out, residual
             elif IS_CUDA_SYSTEM:
                 # faster post attention rms norm
                 (
@@ -717,10 +724,14 @@ try:
 
                 # Inplace operation, updating query and key.
                 pos_encoding_ops.rotary_embedding(query, key, head_size, cos, sin, True)
+            elif IS_XPU_SYSTEM:
+                import intel_extension_for_pytorch as ipex
+                ipex.llm.modules.ApplyRotaryEmbedding.rotary_embedding(query, key, sin, cos, query.size(-1), True)
+                # sin = sin.repeat(1, 1, 2).expand(query.shape)
+                # cos = cos.repeat(1, 1, 2).expand(query.shape)
+                # torch.ops.torch_ipex.apply_rotary_embedding_half_qk(query, key, sin, cos, query, key)
             else:
-                sin = sin.repeat(1, 1, 2).expand(query.shape)
-                cos = cos.repeat(1, 1, 2).expand(query.shape)
-                torch.ops.torch_ipex.apply_rotary_embedding_half_qk(query, key, sin, cos, query, key)
+                raise NotImplementedError("roatry embeding not implemented on this system")
 
 
         @classmethod
