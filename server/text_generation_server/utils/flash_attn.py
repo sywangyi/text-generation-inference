@@ -103,16 +103,7 @@ def attention(
 
     if not (IS_ROCM_SYSTEM or IS_CUDA_SYSTEM):
         import intel_extension_for_pytorch as ipex
-        # return ref_attention(
-        #         q,
-        #         k,
-        #         v,
-        #         out,
-        #         cu_seqlens,
-        #         max_s,
-        #         softmax_scale,
-        #         window_size_left=-1,)
-        return ipex.llm.modules.varlen_fwd(
+        return ipex.llm.modules.VarlenAttention.apply(
             q,
             k,
             v,
@@ -128,23 +119,6 @@ def attention(
             False,
             None
         )
-        # return torch.xpu.varlen_fwd(
-        #     q,
-        #     k,
-        #     v,
-        #     out,
-        #     cu_seqlens,
-        #     cu_seqlens,
-        #     max_s,
-        #     max_s,
-        #     0.0,
-        #     softmax_scale,
-        #     False,
-        #     True,
-        #     False,
-        #     None
-        # )
-
 
     if HAS_FLASH_ATTN_V2_CUDA:
         return flash_attn_2_cuda.varlen_fwd(

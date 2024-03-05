@@ -21,6 +21,8 @@ from text_generation_server.utils.gptq.quant_linear import QuantLinear
 from text_generation_server.utils.import_utils import IS_CUDA_SYSTEM, IS_ROCM_SYSTEM, IS_XPU_SYSTEM
 from text_generation_server.utils.log import log_once
 
+if IS_XPU_SYSTEM:
+    import intel_extension_for_pytorch as ipex
 HAS_AWQ = True
 try:
     from text_generation_server.utils.awq.quantize.qmodule import WQLinear
@@ -543,15 +545,11 @@ try:
     class FastLayerNorm(nn.LayerNorm):
         def forward(self, hidden_states, residual=None):
             if hidden_states.shape[-1] > 8192 or not IS_CUDA_SYSTEM:
-                import intel_extension_for_pytorch as ipex
                 if residual is not None:
                     hidden_states += residual
                 residual = hidden_states
-                # out = torch.ops.torch_ipex.43_norm(hidden_states, self.normalized_shape, self.weight, self.bias, self.eps)
-                layernorm = ipex.llm.modules.FastLayerNorm(self.normalized_shape, self.eps, self.weight, self.bias)
-                out = layernorm(hidden_states)
+                out = ipex.llm.modules.FastLayerNorm.apply(hidden_states, self.normalized_shape, self.eps, self.weight, self.bias)
                 return out, residual
-                # return super(FastLayerNorm, self).forward(hidden_states), residual
             else:
                 (
                     normed_hidden_states,
@@ -597,17 +595,7 @@ try:
                 if residual is not None:
                     hidden_states += residual
                 residual = hidden_states
-                rmsnorm = ipex.llm.modules.RMSNorm([hidden_states.size(-1)], self.variance_epsilon, self.weight)
-                out = rmsnorm(hidden_states)
-                # out = torch.ops.torch_ipex.rms_norm(
-                #     hidden_states, [hidden_states.size(-1)], self.weight, self.variance_epsilon
-                # )
-
-                # hidden_states = hidden_states.to(torch.float32)
-                # variance = hidden_states.pow(2).mean(-1, keepdim=True)
-                # hidden_states = hidden_states * torch.rsqrt(
-                #     variance + self.variance_epsilon
-                # )
+                out = ipex.llm.modules.RMSNorm.apply(hidden_states, [hidden_states.size(-1)], self.weight, self.variance_epsilon)
 
                 # # convert into half-precision if necessary
                 # if self.weight.dtype in [torch.float16, torch.bfloat16]:
@@ -726,10 +714,7 @@ try:
                 pos_encoding_ops.rotary_embedding(query, key, head_size, cos, sin, True)
             elif IS_XPU_SYSTEM:
                 import intel_extension_for_pytorch as ipex
-                ipex.llm.modules.ApplyRotaryEmbedding.rotary_embedding(query, key, sin, cos, query.size(-1), True)
-                # sin = sin.repeat(1, 1, 2).expand(query.shape)
-                # cos = cos.repeat(1, 1, 2).expand(query.shape)
-                # torch.ops.torch_ipex.apply_rotary_embedding_half_qk(query, key, sin, cos, query, key)
+                ipex.llm.modules.RotaryEmbedding.apply(query, key, sin, cos, query.size(-1), True)
             else:
                 raise NotImplementedError("roatry embeding not implemented on this system")
 
