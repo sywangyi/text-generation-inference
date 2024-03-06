@@ -26,7 +26,7 @@ def reshape_and_cache(
         cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slots)
     elif IS_XPU_SYSTEM:
         ipex.llm.modules.PagedAttention.reshape_and_cache(
-            key, value, key_cache, value_cache, slots
+            key, value, key_cache, value_cache, slots.to(torch.int64)
         )
 
 
