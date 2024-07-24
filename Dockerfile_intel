@@ -101,7 +101,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     curl \
     ca-certificates \
     make \
-    g++ \
+    g++-12 \
+    gcc-12 \
     git \
     wget \
     cmake
@@ -130,9 +131,9 @@ RUN chmod +x ~/mambaforge.sh && \
 
 RUN conda install -c conda-forge gperftools mkl
 
-RUN pip install https://download.pytorch.org/whl/nightly/cpu/torch-2.4.0.dev20240612%2Bcpu-cp310-cp310-linux_x86_64.whl
-RUN pip install https://download.pytorch.org/whl/nightly/cpu/torchvision-0.19.0.dev20240612%2Bcpu-cp310-cp310-linux_x86_64.whl
-RUN pip install https://download.pytorch.org/whl/nightly/cpu/torchaudio-2.4.0.dev20240612%2Bcpu-cp310-cp310-linux_x86_64.whl
+RUN pip install https://download.pytorch.org/whl/nightly/cpu/torch-2.5.0.dev20240720%2Bcpu-cp310-cp310-linux_x86_64.whl
+RUN pip install https://download.pytorch.org/whl/nightly/cpu/torchvision-0.20.0.dev20240722%2Bcpu-cp310-cp310-linux_x86_64.whl
+RUN pip install https://download.pytorch.org/whl/nightly/cpu/torchaudio-2.4.0.dev20240722%2Bcpu-cp310-cp310-linux_x86_64.whl
 RUN pip install triton
 
 WORKDIR /usr/src
