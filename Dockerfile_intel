@@ -107,6 +107,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     wget \
     cmake
 
+RUN update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 12
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 12
+
 ENV HUGGINGFACE_HUB_CACHE=/data \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
     PORT=80
