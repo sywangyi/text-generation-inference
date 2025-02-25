@@ -270,6 +270,12 @@ def paged_reshape_and_cache(
         ipex.llm.modules.PagedAttention.reshape_and_cache(
             key, value, key_cache, value_cache, slots
         )
+    elif SYSTEM == "hpu":
+        from vllm_hpu_extension import cache_ops
+
+        cache_ops.reshape_and_cache(
+            key, value, key_cache, value_cache, slots, "auto", 1.0
+        )
     else:
         raise NotImplementedError(
             f"Cannot reshape and cache for paged attention, system '{SYSTEM}' not supported"

@@ -12,6 +12,10 @@ elif SYSTEM == "rocm":
     import vllm._custom_ops as ops
 elif SYSTEM == "ipex":
     import intel_extension_for_pytorch as ipex
+elif SYSTEM == "hpu":
+    from habana_frameworks.torch.hpex.kernels import (
+        RotaryPosEmbeddingHelperV2 as FusedRoPE,
+    )
 
 
 def _create_inv_freq(dim, base, device):
@@ -73,6 +77,16 @@ class PositionRotaryEmbedding(nn.Module):
         elif SYSTEM == "ipex":
             ipex.llm.functional.rotary_embedding(
                 query, key, sin, cos, query.size(-1), True
+            )
+        elif SYSTEM == "hpu":
+            query = FusedRoPE.apply(
+                query,
+                cos.unsqueeze(0).unsqueeze(0),
+                sin.unsqueeze(0).unsqueeze(0),
+                None,
+            )
+            key = FusedRoPE.apply(
+                key, cos.unsqueeze(0).unsqueeze(0), sin.unsqueeze(0).unsqueeze(0), None
             )
         else:
             raise ValueError(

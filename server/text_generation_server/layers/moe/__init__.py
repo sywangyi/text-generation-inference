@@ -26,7 +26,7 @@ from text_generation_server.utils.weights import (
     UnquantizedWeight,
 )
 
-if SYSTEM == "ipex":
+if SYSTEM == "ipex" or SYSTEM == "hpu":
     from .fused_moe_ipex import fused_topk, grouped_topk
 elif SYSTEM == "cuda":
     moe_kernels = load_kernel(module="moe", repo_id="kernels-community/moe")

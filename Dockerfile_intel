@@ -130,6 +130,10 @@ COPY --from=builder /usr/src/target/release-opt/text-generation-router /usr/loca
 # Install launcher
 COPY --from=builder /usr/src/target/release-opt/text-generation-launcher /usr/local/bin/text-generation-launcher
 
+ENV ATTENTION=flashdecoding-ipex
+ENV PREFIX_CACHING=1
+ENV PREFILL_CHUNKING=1
+
 
 # Text Generation Inference base image for Intel-cpu
 FROM ubuntu:22.04 AS cpu
@@ -218,10 +222,45 @@ COPY --from=builder /usr/src/target/release-opt/text-generation-router /usr/loca
 # Install launcher
 COPY --from=builder /usr/src/target/release-opt/text-generation-launcher /usr/local/bin/text-generation-launcher
 
-FROM ${PLATFORM} AS final
 ENV ATTENTION=flashdecoding-ipex
 ENV PREFIX_CACHING=1
 ENV PREFILL_CHUNKING=1
+
+# Text Generation Inference base image for Intel-hpu
+FROM vault.habana.ai/gaudi-docker/1.19.2/rhel9.4/habanalabs/pytorch-installer-2.5.1:latest AS hpu
+
+ENV HUGGINGFACE_HUB_CACHE=/data \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    PORT=80
+
+ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+
+# Install server
+COPY proto proto
+COPY server server
+COPY server/Makefile server/Makefile
+ENV UV_SYSTEM_PYTHON=1
+RUN cd server && \
+    make gen-server && \
+    pip install -U pip uv && \
+    uv pip install -e ".[accelerate, compressed-tensors, peft, outlines]" --no-cache-dir
+
+RUN pip install git+https://github.com/sywangyi/vllm-hpu-extension.git
+RUN pip install numpy==1.23.5
+
+# Install benchmarker
+COPY --from=builder /usr/src/target/release-opt/text-generation-benchmark /usr/local/bin/text-generation-benchmark
+# Install router
+COPY --from=builder /usr/src/target/release-opt/text-generation-router /usr/local/bin/text-generation-router
+# Install launcher
+COPY --from=builder /usr/src/target/release-opt/text-generation-launcher /usr/local/bin/text-generation-launcher
+ENV ATTENTION=paged
+ENV PREFIX_CACHING=0
+ENV PREFILL_CHUNKING=0
+
+
+FROM ${PLATFORM} AS final
 ENV CUDA_GRAPHS=0
+
 ENTRYPOINT ["text-generation-launcher"]
 CMD ["--json-output"]
