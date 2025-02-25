@@ -24,6 +24,12 @@ elif SYSTEM == "ipex":
         attention,
         paged_attention,
     )
+elif SYSTEM == "hpu":
+    from .hpu import (
+        SUPPORTS_WINDOWING,
+        attention,
+        paged_attention,
+    )
 else:
     raise ImportError(f"System {SYSTEM} doesn't support flash/paged attention")
 

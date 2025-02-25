@@ -28,7 +28,7 @@ if SYSTEM == "ipex":
     from intel_extension_for_pytorch.llm.modules import GatedMLPMOE
 elif SYSTEM == "cuda":
     moe_kernels = load_kernel(module="moe", repo_id="kernels-community/moe")
-else:
+elif SYSTEM != "hpu":
     import moe_kernels
 
 from text_generation_server.layers.attention import (

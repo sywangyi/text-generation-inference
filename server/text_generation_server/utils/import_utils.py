@@ -27,7 +27,7 @@ def is_hpu_available():
             )
             torch_hpu.device_count = lambda: true_device_count
 
-    return torch_hpu.device_count > 0
+    return torch_hpu.device_count() > 0
 
 
 def get_cuda_free_memory(device, memory_fraction):

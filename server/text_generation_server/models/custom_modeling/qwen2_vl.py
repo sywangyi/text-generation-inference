@@ -23,6 +23,8 @@ from text_generation_server.utils.import_utils import SYSTEM
 
 if SYSTEM == "ipex":
     import intel_extension_for_pytorch as ipex
+elif SYSTEM == "hpu":
+    from habana_frameworks.torch.hpex.kernels import FusedSDPA
 else:
     import flash_attn_2_cuda
 
@@ -146,6 +148,12 @@ class Qwen2VLAttention(nn.Module):
                 False,
                 None,
             )
+        elif SYSTEM == "hpu":
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            attn_output = FusedSDPA.apply(query, key, value, None, 0.0, causal, None)
+            attn_output = attn_output.transpose(1, 2)
         else:
             attn_output = flash_attn_2_cuda.varlen_fwd(
                 query,

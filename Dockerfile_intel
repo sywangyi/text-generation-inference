@@ -246,7 +246,7 @@ RUN cd server && \
     uv pip install -e ".[accelerate, compressed-tensors, peft, outlines]" --no-cache-dir
 
 RUN pip install git+https://github.com/sywangyi/vllm-hpu-extension.git
-RUN pip install numpy==1.23.5
+RUN pip install numpy==1.23.5 triton==3.1.0
 
 # Install benchmarker
 COPY --from=builder /usr/src/target/release-opt/text-generation-benchmark /usr/local/bin/text-generation-benchmark

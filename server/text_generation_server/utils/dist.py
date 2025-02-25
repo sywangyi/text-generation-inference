@@ -44,6 +44,9 @@ class FakeGroup(ProcessGroup):
     def rank(self):
         return self._rank
 
+    def _get_backend_name(self):
+        return "fake"
+
 
 def initialize_torch_distributed():
     if torch.cuda.is_available():
@@ -79,6 +82,14 @@ def initialize_torch_distributed():
                     rank=RANK,
                     timeout=timedelta(seconds=120),
                     pg_options=options,
+                )
+            elif SYSTEM == "hpu":
+                device = torch.device(f"hpu:{RANK}")
+                torch.distributed.init_process_group(
+                    backend="hccl",
+                    world_size=WORLD_SIZE,
+                    rank=RANK,
+                    timeout=timedelta(seconds=120),
                 )
             else:
                 device = torch.device(f"cuda:{RANK}")
