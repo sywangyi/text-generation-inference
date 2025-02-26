@@ -113,6 +113,19 @@ class KVCache:
                     device=device,
                 ),
             )
+        elif SYSTEM == "hpu":
+            self.kv_cache = (
+                torch.empty(
+                    (num_blocks, BLOCK_SIZE, num_heads, head_size),
+                    dtype=dtype,
+                    device=device,
+                ),
+                torch.empty(
+                    (num_blocks, BLOCK_SIZE, num_heads, head_size),
+                    dtype=dtype,
+                    device=device,
+                ),
+            )
         else:
             self.kv_cache = (
                 torch.zeros(
@@ -273,9 +286,10 @@ def paged_reshape_and_cache(
     elif SYSTEM == "hpu":
         from vllm_hpu_extension import cache_ops
 
-        cache_ops.reshape_and_cache(
-            key, value, key_cache, value_cache, slots, "auto", 1.0
-        )
+        block_idx = slots // BLOCK_SIZE
+        block_offset = slots % BLOCK_SIZE
+        cache_ops.insert_or_update_cache(key, key_cache, block_idx, block_offset)
+        cache_ops.insert_or_update_cache(value, value_cache, block_idx, block_offset)
     else:
         raise NotImplementedError(
             f"Cannot reshape and cache for paged attention, system '{SYSTEM}' not supported"

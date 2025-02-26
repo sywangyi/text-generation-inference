@@ -43,7 +43,7 @@ def get_hpu_free_memory(device, memory_fraction):
     device_id = device.index
     mem_stats = memory_stats(device_id)
     logger.info(f"mem_stats: {mem_stats}")
-    free_memory = mem_stats["Limit "] - mem_stats["InUser"]
+    free_memory = mem_stats["Limit"] - mem_stats["InUse"]
     return free_memory
 
 
@@ -68,6 +68,10 @@ def get_cpu_free_memory(device, memory_fraction):
     mem = psutil.virtual_memory()
     free_memory = int(mem.available * 0.95 / WORLD_SIZE)
     return free_memory
+
+
+def synchronize_hpu(device):
+    torch.hpu.synchronize()
 
 
 def noop(*args, **kwargs):
@@ -105,7 +109,7 @@ elif hasattr(torch, "xpu") and torch.xpu.is_available():
 elif is_hpu_available():
     SYSTEM = "hpu"
     empty_cache = noop
-    synchronize = torch.hpu.synchronize
+    synchronize = synchronize_hpu
     get_free_memory = get_hpu_free_memory
 else:
     SYSTEM = "cpu"

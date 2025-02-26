@@ -122,24 +122,18 @@ class FastRMSNorm(nn.Module):
 
     def forward(self, hidden_states, residual=None):
         if SYSTEM == "hpu":
-            from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
+            from vllm_hpu_extension.kernels import rms_norm
 
-            # mixed dtypes are not good for FusedRMSNorm, both inputs need to have same dtype
-            if hidden_states.dtype != self.weight.dtype:
-                orig_dtype = hidden_states.dtype
-                out = FusedRMSNorm.apply(
-                    hidden_states.to(self.weight.dtype),
-                    self.weight,
-                    self.variance_epsilon,
-                )
-                return out.to(orig_dtype), (
-                    residual if residual is not None else hidden_states
-                )
+            orig_shape = hidden_states.shape
+            if residual is not None:
+                residual += hidden_states.view(residual.shape)
             else:
-                out = FusedRMSNorm.apply(
-                    hidden_states, self.weight, self.variance_epsilon
-                )
-                return out, residual if residual is not None else hidden_states
+                residual = hidden_states
+            # Note: HPUFusedRMSNorm requires 3D tensors as inputs
+            if len(orig_shape) == 2:
+                residual = residual.unsqueeze(0)
+            x = rms_norm().apply(residual, self.weight, self.variance_epsilon)
+            return x.view(orig_shape), residual.view(orig_shape)
         elif SYSTEM == "ipex":
             out = ipex.llm.functional.add_rms_norm(
                 residual,

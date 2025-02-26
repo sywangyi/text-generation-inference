@@ -505,7 +505,9 @@ class HeterogeneousNextTokenChooser:
 
 class Sampling:
     def __init__(self, seed: int, device: str = "cpu"):
-        self.generator = torch.Generator(device)
+        self.generator = torch.Generator(
+            device=device if "hpu" not in device else "cpu"
+        )
         self.generator.manual_seed(seed)
         self.seed = seed
 
