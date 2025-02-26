@@ -234,7 +234,7 @@ ENV HUGGINGFACE_HUB_CACHE=/data \
     PORT=80
 
 ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
-
+ENV PT_HPU_LAZY_MODE=1
 # Install server
 COPY proto proto
 COPY server server

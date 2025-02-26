@@ -43,7 +43,9 @@ def get_hpu_free_memory(device, memory_fraction):
     device_id = device.index
     mem_stats = memory_stats(device_id)
     logger.info(f"mem_stats: {mem_stats}")
-    free_memory = mem_stats["Limit"] - mem_stats["InUse"]
+    total_free_memory = mem_stats["Limit"] - mem_stats["MaxInUse"]
+    memory_fraction = float(os.getenv("HPU_MEMORY_FRACTION", "0.8"))
+    free_memory = max(0, int(total_free_memory * memory_fraction))
     return free_memory
 
 

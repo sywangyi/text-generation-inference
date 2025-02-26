@@ -711,13 +711,13 @@ class MllamaTextCrossAttention(nn.Module):
         #     f"Q: {query_states.shape} -K {key_states.shape} - V{value_states.shape}"
         # )
         if SYSTEM == "hpu":
-            query_states = query_states.transpose(1, 2)
-            key_states = key_states.transpose(1, 2)
-            value_states = value_states.transpose(1, 2)
+            query_states = query_states.unsqueeze(0).transpose(1, 2)
+            key_states = key_states.unsqueeze(0).transpose(1, 2)
+            value_states = value_states.unsqueeze(0).transpose(1, 2)
             attn_output = FusedSDPA.apply(
                 query_states, key_states, value_states, None, 0.0, causal, None
             )
-            attn_output = attn_output.transpose(1, 2)
+            attn_output = attn_output.transpose(1, 2).squeeze(0).contiguous()
         elif SYSTEM == "ipex":
             attn_output = torch.empty_like(query_states)
             ipex.llm.functional.varlen_attention(

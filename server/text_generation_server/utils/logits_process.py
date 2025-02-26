@@ -7,7 +7,7 @@ from typing import List, Optional, DefaultDict
 from loguru import logger
 from typing import Dict
 from text_generation_server.pb.generate_pb2 import GrammarType
-
+from text_generation_server.utils.import_utils import SYSTEM
 from outlines.fsm.guide import RegexGuide
 
 from transformers import (
@@ -19,6 +19,8 @@ from transformers import (
     TypicalLogitsWarper,
 )
 
+if SYSTEM == "hpu":
+    import habana_frameworks.torch.core as htcore
 mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
 
 
@@ -46,6 +48,7 @@ class StaticWarper:
         self.static_scores = None
         self.static_warped_scores = None
         self.static_next_logprob = None
+        self.hpu_graph = None
 
     def __call__(self, scores):
         if torch.cuda.is_available():
@@ -67,6 +70,28 @@ class StaticWarper:
             self.static_scores.copy_(scores)
             self.cuda_graph.replay()
 
+            return self.static_warped_scores, self.static_next_logprob
+
+        if SYSTEM == "hpu":
+            if self.hpu_graph is None:
+                self.static_scores = scores.clone().contiguous()
+                self.static_warped_scores = scores.clone().contiguous()
+                self.static_next_logprob = scores.clone().contiguous()
+                self.hpu_graph = htcore.hpu.HPUGraph()
+
+                with htcore.hpu.graph(self.hpu_graph):
+                    local_scores = self.static_scores
+                    for warper in self.warpers:
+                        local_scores = warper(None, local_scores)
+
+                    self.static_warped_scores.copy_(local_scores)
+                    # Compute logprobs
+                    self.static_next_logprob.copy_(
+                        torch.log_softmax(self.static_warped_scores, -1)
+                    )
+
+            self.static_scores.copy_(scores)
+            self.hpu_graph.replay()
             return self.static_warped_scores, self.static_next_logprob
 
         # CPU branch
@@ -169,10 +194,21 @@ class HeterogeneousFrequencyPenaltyLogitsProcessor(LogitsProcessor):
         vocab_size = scores.size(1)
 
         # Calculate the frequency for each token so far
-        token_freq = torch.zeros(batch_size, vocab_size, device=input_ids.device)
-        token_freq.scatter_add_(
-            1, input_ids, torch.ones_like(input_ids, dtype=torch.float)
-        )
+        if input_ids.device.type == "hpu":
+            # dtype mismatch will cause error in hpu lazy mode
+            token_freq = torch.zeros(
+                batch_size, vocab_size, dtype=scores.dtype, device=scores.device
+            )
+            token_freq.scatter_add_(
+                1,
+                input_ids,
+                torch.ones_like(input_ids, dtype=scores.dtype, device=scores.device),
+            )
+        else:
+            token_freq = torch.zeros(batch_size, vocab_size, device=input_ids.device)
+            token_freq.scatter_add_(
+                1, input_ids, torch.ones_like(input_ids, dtype=torch.float)
+            )
         token_freq /= input_size
 
         # Apply the frequency penalty to logits

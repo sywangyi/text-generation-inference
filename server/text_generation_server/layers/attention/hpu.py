@@ -28,11 +28,11 @@ def attention(
     causal: bool = True,
     softcap: Optional[float] = None,
 ):
-    query = query.transpose(1, 2)
-    key = key.transpose(1, 2)
-    value = value.transpose(1, 2)
+    query = query.unsqueeze(0).transpose(1, 2)
+    key = key.unsqueeze(0).transpose(1, 2)
+    value = value.unsqueeze(0).transpose(1, 2)
     attn_output = FusedSDPA.apply(query, key, value, None, 0.0, causal, None)
-    attn_output = attn_output.transpose(1, 2)
+    attn_output = attn_output.transpose(1, 2).squeeze(0).contiguous()
     return attn_output
 
 
