@@ -967,6 +967,7 @@ class FlashCausalLMBatch(Batch):
         device = self.block_tables_tensor.device
 
         # hpu does not support varlen for prefill, use sdpa instead. so need to pad input_tensor, position
+        # padding to left to work with sliding window
         # use prefill_cache_indices to indicate the valid kv slot, update prefill_next_token_indices to indicate
         # the right logit position
 
@@ -980,15 +981,12 @@ class FlashCausalLMBatch(Batch):
                     padded = self.max_input_length - len(input_id)
                     input_id_padded = input_id
                     if padded > 0:
-                        input_id_padded.extend([0] * padded)
+                        input_id_padded = [0] * padded + input_id_padded
                     input_ids_padded.append(input_id_padded)
                     input_ids_padded_length.append(padded)
                 input_ids_padded = np.concatenate(input_ids_padded, dtype=np.int64)
                 input_ids_padded = torch.tensor(
                     input_ids_padded, dtype=torch.int64, device=device
-                )
-                input_ids_padded_length = torch.tensor(
-                    input_ids_padded_length, dtype=torch.int64, device=device
                 )
 
         if isinstance(self.input_ids, list):
@@ -1064,17 +1062,13 @@ class FlashCausalLMBatch(Batch):
 
             if not has_triton():
                 # Position ids
+                request_position_ids = torch.arange(
+                    cache_length, cache_length + input_length, dtype=torch.int32
+                )
                 if device.type == "hpu" and input_ids_padded is not None:
-                    request_position_ids = torch.arange(
-                        cache_length,
-                        cache_length + self.max_input_length,
-                        dtype=torch.int32,
+                    position_ids.append(
+                        torch.ones(input_ids_padded_length[i], dtype=torch.int32)
                     )
-                else:
-                    request_position_ids = torch.arange(
-                        cache_length, cache_length + input_length, dtype=torch.int32
-                    )
-
                 position_ids.append(request_position_ids)
 
                 if not r.slots:
@@ -1099,8 +1093,11 @@ class FlashCausalLMBatch(Batch):
 
             # Create tensor to slice into the kv tensor in prefill
             if device.type == "hpu" and input_ids_padded is not None:
-                # hpu need request_prefill_cache_indices
-                sliding_window = input_length
+                # hpu need request_prefill_cache_indices to skip padding in kv cache
+                sliding_window = get_sliding_windows()
+                if sliding_window is None:
+                    sliding_window = input_length
+                cumulative_length += input_ids_padded_length[i]
             if sliding_window is not None:
                 request_prefill_cache_indices = torch.arange(
                     cumulative_length + max(0, input_length - sliding_window),
@@ -1222,15 +1219,18 @@ class FlashCausalLMBatch(Batch):
         self.prefill_next_token_indices = prefill_next_token_indices
         if device.type == "hpu" and input_ids_padded is not None:
             self.input_ids = input_ids_padded
+            input_ids_padded_length_tensor = torch.cumsum(
+                torch.tensor(input_ids_padded_length, dtype=torch.int64, device=device),
+                dim=-1,
+            )
             if self.prefill_head_indices is not None:
-                self.prefill_head_indices[1:] = (
-                    self.prefill_head_indices[1:].clone()
-                    + input_ids_padded_length[0:-1]
+                self.prefill_head_indices = (
+                    self.prefill_head_indices + input_ids_padded_length_tensor
                 )
+
             if self.prefill_next_token_indices is not None:
-                self.prefill_next_token_indices[1:] = (
-                    self.prefill_next_token_indices[1:].clone()
-                    + input_ids_padded_length[0:-1]
+                self.prefill_next_token_indices = (
+                    self.prefill_next_token_indices + input_ids_padded_length_tensor
                 )
 
         if adapter_set:

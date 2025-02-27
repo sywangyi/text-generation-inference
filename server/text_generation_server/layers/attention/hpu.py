@@ -47,7 +47,7 @@ def attention(
         softmax_mode="None",
         recompute_mode=None,
         valid_sequence_lengths=seqlen.input_lengths,
-        padding_side="right",
+        padding_side="left",
     )
     attn_output = attn_output.transpose(1, 2).squeeze(0).contiguous()
     return attn_output
