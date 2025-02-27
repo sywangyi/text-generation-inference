@@ -6,6 +6,7 @@ from text_generation_server.layers.attention.kv_cache import KVCache, KVScales
 from vllm_hpu_extension import ops
 from vllm_hpu_extension.utils import Matmul
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
+from vllm_hpu_extension.utils import ModuleFusedSDPA
 
 SUPPORTS_WINDOWING = False
 
@@ -28,10 +29,26 @@ def attention(
     causal: bool = True,
     softcap: Optional[float] = None,
 ):
-    query = query.unsqueeze(0).transpose(1, 2)
-    key = key.unsqueeze(0).transpose(1, 2)
-    value = value.unsqueeze(0).transpose(1, 2)
-    attn_output = FusedSDPA.apply(query, key, value, None, 0.0, causal, None)
+    fsdpa_op = ModuleFusedSDPA(FusedSDPA)
+    bs = seqlen.input_lengths.shape[0]
+    _, head_num, head_size = query.shape
+    _, kv_head_num, head_size = key.shape
+    query = query.view(bs, -1, head_num, head_size).transpose(1, 2)
+    key = key.view(bs, -1, kv_head_num, head_size).transpose(1, 2)
+    value = value.view(bs, -1, kv_head_num, head_size).transpose(1, 2)
+    attn_output = fsdpa_op(
+        query,
+        key,
+        value,
+        attn_mask=None,
+        dropout_p=0.0,
+        is_causal=causal,
+        scale=None,
+        softmax_mode="None",
+        recompute_mode=None,
+        valid_sequence_lengths=seqlen.input_lengths,
+        padding_side="right",
+    )
     attn_output = attn_output.transpose(1, 2).squeeze(0).contiguous()
     return attn_output
 

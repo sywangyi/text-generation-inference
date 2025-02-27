@@ -25,6 +25,7 @@ if SYSTEM == "ipex":
     import intel_extension_for_pytorch as ipex
 elif SYSTEM == "hpu":
     from habana_frameworks.torch.hpex.kernels import FusedSDPA
+    from vllm_hpu_extension.utils import ModuleFusedSDPA
 else:
     import flash_attn_2_cuda
 
@@ -714,8 +715,18 @@ class MllamaTextCrossAttention(nn.Module):
             query_states = query_states.unsqueeze(0).transpose(1, 2)
             key_states = key_states.unsqueeze(0).transpose(1, 2)
             value_states = value_states.unsqueeze(0).transpose(1, 2)
-            attn_output = FusedSDPA.apply(
-                query_states, key_states, value_states, None, 0.0, causal, None
+            fsdpa_op = ModuleFusedSDPA(FusedSDPA)
+            attn_output = fsdpa_op(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=causal,
+                scale=None,
+                softmax_mode="None",
+                recompute_mode=None,
+                valid_sequence_lengths=None,
             )
             attn_output = attn_output.transpose(1, 2).squeeze(0).contiguous()
         elif SYSTEM == "ipex":

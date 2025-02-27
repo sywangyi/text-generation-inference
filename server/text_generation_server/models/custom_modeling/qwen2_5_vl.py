@@ -25,6 +25,7 @@ if SYSTEM == "ipex":
     import intel_extension_for_pytorch as ipex
 elif SYSTEM == "hpu":
     from habana_frameworks.torch.hpex.kernels import FusedSDPA
+    from vllm_hpu_extension.utils import ModuleFusedSDPA
 else:
     import flash_attn_2_cuda
 
@@ -483,7 +484,19 @@ class Qwen2_5VLAttention(nn.Module):
             query = query.unsqueeze(0).transpose(1, 2)
             key = key.unsqueeze(0).transpose(1, 2)
             value = value.unsqueeze(0).transpose(1, 2)
-            attn_output = FusedSDPA.apply(query, key, value, None, 0.0, causal, None)
+            fsdpa_op = ModuleFusedSDPA(FusedSDPA)
+            attn_output = fsdpa_op(
+                query,
+                key,
+                value,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=causal,
+                scale=None,
+                softmax_mode="None",
+                recompute_mode=None,
+                valid_sequence_lengths=None,
+            )
             attn_output = attn_output.transpose(1, 2).squeeze(0).contiguous()
         else:
             attn_output = flash_attn_2_cuda.varlen_fwd(

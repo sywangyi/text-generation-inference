@@ -215,6 +215,7 @@ class FlashLlamaAttention(torch.nn.Module):
         seqlen,
         max_s,
         adapter_data,
+        prefill_cache_indices: Optional[torch.Tensor],
     ):
         qkv = self.query_key_value(hidden_states, adapter_data)
         query, kv = qkv.split(
@@ -229,9 +230,14 @@ class FlashLlamaAttention(torch.nn.Module):
 
         self.rotary_emb(query, torch.select(kv, dim=1, index=0), cos, sin)
 
+        if prefill_cache_indices is not None:
+            kv_to_cache = kv[prefill_cache_indices]
+        else:
+            kv_to_cache = kv
+
         kv_cache.store(
-            key=kv[:, 0],
-            value=kv[:, 1],
+            key=kv_to_cache[:, 0],
+            value=kv_to_cache[:, 1],
             slots=slots,
             kv_scales=self.kv_scales,
         )
@@ -470,6 +476,7 @@ class FlashLlamaLayer(nn.Module):
         max_s,
         adapter_data,
         cross_attention_states,
+        prefill_cache_indices: Optional[torch.Tensor],
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
 
@@ -485,6 +492,7 @@ class FlashLlamaLayer(nn.Module):
             seqlen,
             max_s,
             adapter_data,
+            prefill_cache_indices,
         )
         if self.residual_multiplier is not None:
             attn_output *= self.residual_multiplier
@@ -607,6 +615,7 @@ class FlashLlamaModel(torch.nn.Module):
                 max_s,
                 adapter_data,
                 cross_attention_states,
+                prefill_cache_indices,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
