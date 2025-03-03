@@ -148,7 +148,7 @@ impl SimpleAllocator {
         SimpleAllocator {
             block_size,
             // Block 0 is reserved for health checks
-            free_blocks: (1..blocks).collect(),
+            free_blocks: (1..blocks).rev().collect(),
             window_size,
         }
     }
@@ -179,9 +179,10 @@ impl Allocator for SimpleAllocator {
         if required_blocks > self.free_blocks.len() as u32 {
             None
         } else {
-            let blocks = self
+            let mut blocks = self
                 .free_blocks
                 .split_off(self.free_blocks.len() - required_blocks as usize);
+            blocks.sort();
             let mut slots =
                 Vec::with_capacity((required_blocks * self.block_size * repeats as u32) as usize);
 

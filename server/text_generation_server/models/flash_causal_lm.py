@@ -61,7 +61,11 @@ from text_generation_server.models.globals import (
     TGI_WIGGLE_ROOM,
     get_adapter_to_index,
 )
-from text_generation_server.layers.attention import KVCache, Seqlen
+from text_generation_server.layers.attention import (
+    KVCache,
+    Seqlen,
+    HPUPagedAttentionMetadata,
+)
 from text_generation_server.utils import StoppingCriteria, HeterogeneousNextTokenChooser
 from text_generation_server.utils.dist import MEMORY_FRACTION
 from text_generation_server.utils.quantization import get_loader
@@ -219,6 +223,8 @@ class FlashCausalLMBatch(Batch):
     num_blocks: int
     # Maximum number of blocks
     max_blocks: int
+
+    hpu_attn_meta: Optional[HPUPagedAttentionMetadata]
 
     def to_pb(self) -> generate_pb2.CachedBatch:
         return generate_pb2.CachedBatch(
@@ -480,6 +486,7 @@ class FlashCausalLMBatch(Batch):
             cache_lengths_tensor=None,
             input_lengths_tensor=None,
             adapter_meta=None,
+            hpu_attn_meta=None,
         )
 
     @classmethod
@@ -956,6 +963,75 @@ class FlashCausalLMBatch(Batch):
             max_blocks=max_blocks,
             speculative_ids=speculative_ids,
             adapter_meta=adapter_meta,
+            hpu_attn_meta=None,
+        )
+
+    def prepare_for_decode(self, dtype):
+        # Prepare values if we need to continue decoding
+        # need for HPUPagedAttentionMetadata preparation
+        import itertools
+        from vllm_hpu_extension.ops import batch2block, block2batch
+
+        def flatten(in_list):
+            return list(itertools.chain(*in_list))
+
+        def padding_fn(input, indices, v):
+            return [input[i] if i is not None else v for i in indices]
+
+        device = self.block_tables_tensor.device
+        last_block_usage = self.slots[self.slot_indices] % BLOCK_SIZE + 1
+        block_num = self.cache_lengths_tensor // BLOCK_SIZE + 1
+        block_tables = []
+        for i, bt in enumerate(self.block_tables):
+            block_tables.append(bt[0 : block_num[i]])
+        block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
+        block_usage = [
+            [BLOCK_SIZE] * (len(bt) - 1) + [lbu]
+            for bt, lbu in zip(block_tables, last_block_usage)
+            if bt
+        ]
+
+        block_list = flatten(block_tables)
+        block_groups = flatten(block_groups)
+        block_usage = flatten(block_usage)
+        batch = self.input_ids.size(0)
+
+        assert len(block_list) == len(block_groups)
+        assert len(block_list) == len(block_usage)
+
+        block_bucket_size = max(max(block_list) + 1, len(block_list))
+        #     block_bucket_size = self.bucketing_ctx.get_padded_decode_num_blocks(
+        #         block_bucket_size)
+        indices: List[Any]
+        indices = [None] * block_bucket_size
+        for i, bid in enumerate(block_list):
+            indices[bid] = i
+
+        block_list = padding_fn(block_list, indices, 0)
+        block_groups = padding_fn(block_groups, indices, -1)
+        block_usage = padding_fn(block_usage, indices, 1)
+
+        block_list = torch.tensor(block_list, dtype=torch.int, device=device)
+        block_groups = torch.tensor(block_groups, dtype=torch.int, device=device)
+        block_usage = torch.tensor(block_usage, dtype=dtype, device=device)
+        block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch)
+        mask = torch.arange(0, BLOCK_SIZE, device=device, dtype=torch.int32).unsqueeze(
+            0
+        )
+        mask = mask >= block_usage.unsqueeze(-1)
+        attn_bias = torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf)
+        ones = torch.ones(
+            (block_mapping.size(0),), device=device, dtype=block_mapping.dtype
+        )
+        sums = batch2block(block2batch(ones, block_mapping), block_mapping)
+        block_scales = torch.reciprocal(torch.maximum(ones, sums))
+        self.hpu_attn_meta = HPUPagedAttentionMetadata(
+            block_list=block_list,
+            block_groups=block_groups,
+            block_usage=block_usage,
+            block_mapping=block_mapping.to(dtype),
+            attn_bias=attn_bias,
+            block_scales=block_scales,
         )
 
     def prepare_for_prefill(self):
@@ -1411,7 +1487,12 @@ class FlashCausalLM(Model):
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
             )
+        # import habana_frameworks.torch as htorch
+        # model = htorch.hpu.wrap_in_hpu_graph(model, disable_tensor_cache=True)
+        if SYSTEM == "hpu":
+            import vllm_hpu_extension.environment as environment
 
+            environment.set_model_config(self.config)
         super().__init__(
             model_id=model_id,
             model=model,
@@ -1926,6 +2007,7 @@ class FlashCausalLM(Model):
                     prefill_cache_indices=batch.prefill_cache_indices,
                     lm_head_indices=lm_head_indices,
                     adapter_data=adapter_data,
+                    hpu_attention_meta=batch.hpu_attn_meta,
                 )
                 if batch.prefill_cache_indices is not None:
                     batch.prefill_cache_indices = None
@@ -1989,6 +2071,8 @@ class FlashCausalLM(Model):
         prefill = batch.prefilling
         if prefill:
             batch.prepare_for_prefill()
+        else:
+            batch.prepare_for_decode(self.dtype)
 
         prefill_logprobs = batch.prefill_next_token_indices is not None
 

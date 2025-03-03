@@ -37,6 +37,7 @@ from text_generation_server.layers.attention import (
     paged_attention,
     attention,
     Seqlen,
+    HPUPagedAttentionMetadata,
 )
 from text_generation_server.layers import (
     TensorParallelRowLinear,
@@ -216,6 +217,7 @@ class FlashLlamaAttention(torch.nn.Module):
         max_s,
         adapter_data,
         prefill_cache_indices: Optional[torch.Tensor],
+        hpu_attention_meta: Optional[HPUPagedAttentionMetadata] = None,
     ):
         qkv = self.query_key_value(hidden_states, adapter_data)
         query, kv = qkv.split(
@@ -266,6 +268,7 @@ class FlashLlamaAttention(torch.nn.Module):
                 seqlen,
                 max_s,
                 kv_scales=self.kv_scales,
+                hpu_attention_meta=hpu_attention_meta,
             )
 
         return self.o_proj(
@@ -477,6 +480,7 @@ class FlashLlamaLayer(nn.Module):
         adapter_data,
         cross_attention_states,
         prefill_cache_indices: Optional[torch.Tensor],
+        hpu_attention_meta: Optional[HPUPagedAttentionMetadata] = None,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
 
@@ -493,6 +497,7 @@ class FlashLlamaLayer(nn.Module):
             max_s,
             adapter_data,
             prefill_cache_indices,
+            hpu_attention_meta=hpu_attention_meta,
         )
         if self.residual_multiplier is not None:
             attn_output *= self.residual_multiplier
@@ -591,6 +596,7 @@ class FlashLlamaModel(torch.nn.Module):
         prefill_cache_indices: Optional[torch.Tensor],
         adapter_data,
         cross_attention_states=None,
+        hpu_attention_meta: Optional[HPUPagedAttentionMetadata] = None,
     ) -> torch.Tensor:
         hidden_states = inputs_embeds
 
@@ -616,6 +622,7 @@ class FlashLlamaModel(torch.nn.Module):
                 adapter_data,
                 cross_attention_states,
                 prefill_cache_indices,
+                hpu_attention_meta=hpu_attention_meta,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -683,6 +690,7 @@ class FlashLlamaForCausalLM(torch.nn.Module):
         lm_head_indices: Optional[torch.Tensor] = None,
         adapter_data: Optional[torch.Tensor] = None,
         cross_attention_states=None,
+        hpu_attention_meta: Optional[HPUPagedAttentionMetadata] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = self.model(
@@ -698,6 +706,7 @@ class FlashLlamaForCausalLM(torch.nn.Module):
             prefill_cache_indices=prefill_cache_indices,
             adapter_data=adapter_data,
             cross_attention_states=cross_attention_states,
+            hpu_attention_meta=hpu_attention_meta,
         )
         if lm_head_indices is not None:
             hidden_states = hidden_states[lm_head_indices]

@@ -4,6 +4,18 @@ from typing import Optional
 
 
 @dataclass
+class HPUPagedAttentionMetadata:
+    """Metadata for PagedAttention."""
+
+    block_list: Optional[torch.Tensor]
+    block_mapping: Optional[torch.Tensor]
+    block_usage: Optional[torch.Tensor]
+    block_scales: Optional[torch.Tensor]
+    block_groups: Optional[torch.Tensor]
+    attn_bias: Optional[torch.Tensor]
+
+
+@dataclass
 class Seqlen:
     input_lengths: torch.Tensor
     cache_lengths: torch.Tensor
