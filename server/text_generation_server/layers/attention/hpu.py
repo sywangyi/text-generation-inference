@@ -42,7 +42,7 @@ def attention(
         attn_mask=None,
         dropout_p=0.0,
         is_causal=causal,
-        scale=None,
+        scale=softmax_scale,
         softmax_mode="None",
         recompute_mode=None,
         valid_sequence_lengths=seqlen.input_lengths,

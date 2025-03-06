@@ -704,6 +704,7 @@ class FlashCausalLMBatch(Batch):
             max_blocks=max_blocks,
             speculative_ids=speculative_ids,
             adapter_meta=adapter_meta,
+            hpu_attn_meta=None,
         )
 
     @classmethod

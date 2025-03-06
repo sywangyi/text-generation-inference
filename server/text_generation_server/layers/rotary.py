@@ -82,7 +82,6 @@ class PositionRotaryEmbedding(nn.Module):
         elif SYSTEM == "hpu":
 
             num_tokens = query.shape[0]
-            rotary_dim = cos.shape[-1]
             head_size = query.shape[-1]
             # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
             # to query hidden dimension, so the original tensors need to be
@@ -92,19 +91,20 @@ class PositionRotaryEmbedding(nn.Module):
             rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
             cos = torch.cat((cos, cos), dim=-1)
             sin = torch.cat((sin, sin), dim=-1)
+            rotary_dim = cos.shape[-1]
             query_shape = query.shape
             query = query.view(num_tokens, -1, head_size)
             query_rot = query[..., :rotary_dim]
             query_pass = query[..., rotary_dim:]
             query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
-            query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+            query.copy_(torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape))
 
             key_shape = key.shape
             key = key.view(num_tokens, -1, head_size)
             key_rot = key[..., :rotary_dim]
             key_pass = key[..., rotary_dim:]
             key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0, rope_mode)
-            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+            key.copy_(torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape))
         else:
             raise ValueError(
                 "Your system seem to be not supported. Please check your install or open an issue at https://github.com/huggingface/text-generation-inference/issues with a clear reproduction."
