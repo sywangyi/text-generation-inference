@@ -65,6 +65,8 @@ from text_generation_server.layers.attention import (
     KVCache,
     Seqlen,
     HPUPagedAttentionMetadata,
+    trim_attn_metadata,
+    trim_seqlen_metadata,
 )
 from text_generation_server.utils import StoppingCriteria, HeterogeneousNextTokenChooser
 from text_generation_server.utils.dist import MEMORY_FRACTION
@@ -84,6 +86,10 @@ from text_generation_server.models.metadata_kernels import (
     prepare_position_slot_ids,
     slots_filtering,
 )
+
+if SYSTEM == "hpu":
+    import vllm_hpu_extension.environment as environment
+    import habana_frameworks.torch as htorch
 
 tracer = trace.get_tracer(__name__)
 
@@ -1026,13 +1032,15 @@ class FlashCausalLMBatch(Batch):
         )
         sums = batch2block(block2batch(ones, block_mapping), block_mapping)
         block_scales = torch.reciprocal(torch.maximum(ones, sums))
-        self.hpu_attn_meta = HPUPagedAttentionMetadata(
-            block_list=block_list,
-            block_groups=block_groups,
-            block_usage=block_usage,
-            block_mapping=block_mapping.to(dtype),
-            attn_bias=attn_bias,
-            block_scales=block_scales,
+        self.hpu_attn_meta = trim_attn_metadata(
+            HPUPagedAttentionMetadata(
+                block_list=block_list,
+                block_groups=block_groups,
+                block_usage=block_usage,
+                block_mapping=block_mapping.to(dtype),
+                attn_bias=attn_bias,
+                block_scales=block_scales,
+            )
         )
 
     def prepare_for_prefill(self):
@@ -1488,11 +1496,9 @@ class FlashCausalLM(Model):
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
             )
-        # import habana_frameworks.torch as htorch
-        # model = htorch.hpu.wrap_in_hpu_graph(model, disable_tensor_cache=True)
         if SYSTEM == "hpu":
-            import vllm_hpu_extension.environment as environment
-
+            if htorch.utils.internal.is_lazy():
+                htorch.hpu.wrap_in_hpu_graph(model, disable_tensor_cache=True)
             environment.set_model_config(self.config)
         super().__init__(
             model_id=model_id,
@@ -1996,6 +2002,10 @@ class FlashCausalLM(Model):
                     max_q=batch.max_input_length,
                     max_k=batch.max_current_length,
                 )
+                kwargs = {}
+                if SYSTEM == "hpu":
+                    if htorch.utils.internal.is_lazy():
+                        kwargs["bypass_hpu_graphs"] = batch.prefilling
                 logits, speculative_logits = self.model.forward(
                     input_ids=input_ids,
                     position_ids=position_ids,
@@ -2003,12 +2013,13 @@ class FlashCausalLM(Model):
                     kv_cache=kv_cache,
                     block_tables=block_tables,
                     slots=slots,
-                    seqlen=seqlen,
+                    seqlen=trim_seqlen_metadata(seqlen) if SYSTEM == "hpu" else seqlen,
                     max_s=max_s,
                     prefill_cache_indices=batch.prefill_cache_indices,
                     lm_head_indices=lm_head_indices,
-                    adapter_data=adapter_data,
+                    adapter_data=None if SYSTEM == "hpu" else adapter_data,
                     hpu_attention_meta=batch.hpu_attn_meta,
+                    **kwargs,
                 )
                 if batch.prefill_cache_indices is not None:
                     batch.prefill_cache_indices = None

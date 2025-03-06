@@ -2,7 +2,12 @@ import os
 
 from text_generation_server.utils.import_utils import SYSTEM
 
-from .common import Seqlen, HPUPagedAttentionMetadata
+from .common import (
+    Seqlen,
+    HPUPagedAttentionMetadata,
+    trim_attn_metadata,
+    trim_seqlen_metadata,
+)
 
 if os.getenv("USE_FLASH_ATTENTION", "").lower() == "false":
     raise ImportError("`USE_FLASH_ATTENTION` is false.")
@@ -44,4 +49,6 @@ __all__ = [
     "KVCache",
     "Seqlen",
     "HPUPagedAttentionMetadata",
+    "trim_seqlen_metadata",
+    "trim_attn_metadata",
 ]
