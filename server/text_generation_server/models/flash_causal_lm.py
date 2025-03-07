@@ -2005,7 +2005,7 @@ class FlashCausalLM(Model):
                 kwargs = {}
                 if SYSTEM == "hpu":
                     if htorch.utils.internal.is_lazy():
-                        kwargs["bypass_hpu_graphs"] = batch.prefilling
+                        kwargs["bypass_hpu_graphs"] = False
                 logits, speculative_logits = self.model.forward(
                     input_ids=input_ids,
                     position_ids=position_ids,

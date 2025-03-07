@@ -37,7 +37,7 @@ def _get_rope_config(config):
 
 
 class PositionRotaryEmbedding(nn.Module):
-    def __init__(self, inv_freq, scaling_factor):
+    def __init__(self, inv_freq, scaling_factor, max_position_embeddings):
         super().__init__()
         self.inv_freq = inv_freq
         self._seq_len_cached = 0
@@ -47,6 +47,10 @@ class PositionRotaryEmbedding(nn.Module):
         self._sin_k_cached = None
         self.scaling_factor = scaling_factor
         self.dynamic_args = None
+        if SYSTEM == "hpu":
+            self._update_cos_sin_cache(
+                torch.float32, inv_freq.device, max_position_embeddings
+            )
 
     def forward(
         self,
@@ -150,7 +154,7 @@ class PositionRotaryEmbedding(nn.Module):
                     ],
                 )
 
-                return cls(inv_freq, scaling_factor)
+                return cls(inv_freq, scaling_factor, config.max_position_embeddings)
 
             elif rope_type == "yarn":
                 scaling_factor = rope_scaling["factor"]
@@ -231,7 +235,7 @@ class PositionRotaryEmbedding(nn.Module):
                 raise NotImplementedError(
                     f"rope scaling type {rope_scaling['type']} is not implemented or invalid"
                 )
-        return cls(inv_freq, scaling_factor)
+        return cls(inv_freq, scaling_factor, config.max_position_embeddings)
 
     @classmethod
     def load(cls, config, prefix, weights):
@@ -277,7 +281,7 @@ class PositionRotaryEmbedding(nn.Module):
                 raise NotImplementedError(
                     f"rope scaling type {rope_scaling['type']} is not implemented or invalid"
                 )
-        return cls(inv_freq, scaling_factor)
+        return cls(inv_freq, scaling_factor, config.max_position_embeddings)
 
     def _update_cos_sin_cache(self, dtype, device, seqlen):
         # Reset the tables if the sequence length has changed,
@@ -307,8 +311,8 @@ class PositionRotaryEmbedding(nn.Module):
             # For NVIDIA, for some reason, the flash-attn rotary kernel requires cos/sin and query/key to be of same dtype: https://github.com/Dao-AILab/flash-attention/blob/017716451d446e464dde9aca3a3c1ed2209caaa9/csrc/rotary/rotary.cpp#L26
             # But later on goes and cast cos/sin to float anyway: https://github.com/Dao-AILab/flash-attention/blob/017716451d446e464dde9aca3a3c1ed2209caaa9/csrc/rotary/rotary_cuda.cu#L29, which looks suboptimal.
             dtype = torch.float32
-
-        self._update_cos_sin_cache(dtype, position_ids.device, max_s)
+        if SYSTEM != "hpu":
+            self._update_cos_sin_cache(dtype, position_ids.device, max_s)
 
         cos = torch.index_select(self._cos_cached, 0, position_ids)
         sin = torch.index_select(self._sin_cached, 0, position_ids)
@@ -424,7 +428,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(PositionRotaryEmbedding):
 class DynamicPositionRotaryEmbedding(PositionRotaryEmbedding):
     def __init__(self, dim, max_position_embeddings, base, device, scaling_factor):
         inv_freq = _create_inv_freq(dim, base, device)
-        super().__init__(inv_freq, scaling_factor)
+        super().__init__(inv_freq, scaling_factor, max_position_embeddings)
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
@@ -502,7 +506,9 @@ class YarnPositionRotaryEmbedding(PositionRotaryEmbedding):
         mscale_all_dim: float,
     ):
         inv_freq = _create_inv_freq(dim, base, device)
-        super().__init__(inv_freq, scaling_factor)
+        super().__init__(
+            inv_freq, scaling_factor, max_position_embeddings * self.scaling_factor
+        )
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
@@ -625,7 +631,8 @@ class RotaryPositionEmbeddingMultimodalSections(PositionRotaryEmbedding):
         max_s: int,
         dtype: torch.dtype,
     ):
-        self._update_cos_sin_cache(dtype, position_ids.device, max_s)
+        if SYSTEM != "hpu":
+            self._update_cos_sin_cache(dtype, position_ids.device, max_s)
         slen = position_ids.shape[0]
 
         cos = self._cos_cached[position_ids].gather(1, self._sections[:slen])

@@ -179,6 +179,7 @@ impl Allocator for SimpleAllocator {
         if required_blocks > self.free_blocks.len() as u32 {
             None
         } else {
+            self.free_blocks.sort_by(|a, b| b.cmp(a));
             let mut blocks = self
                 .free_blocks
                 .split_off(self.free_blocks.len() - required_blocks as usize);
