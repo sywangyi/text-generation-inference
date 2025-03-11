@@ -4,6 +4,7 @@ from loguru import logger
 from typing import Dict, Optional
 
 from text_generation_server.utils.log import log_master
+from text_generation_server.utils.import_utils import SYSTEM
 
 REQUEST_LOGPROBS = os.getenv("REQUEST_LOGPROBS", "0").lower() in {"1", "true"}
 ATTENTION = os.environ["ATTENTION"]
@@ -42,7 +43,10 @@ elif ATTENTION == "flashinfer":
 elif ATTENTION == "flashdecoding-ipex":
     BLOCK_SIZE = 64
 else:
-    BLOCK_SIZE = 16
+    if SYSTEM == "hpu":
+        BLOCK_SIZE = 128
+    else:
+        BLOCK_SIZE = 16
 
 cuda_graphs = os.getenv("CUDA_GRAPHS")
 if cuda_graphs is not None:
