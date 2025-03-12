@@ -7,6 +7,9 @@ from text_generation_server.utils.import_utils import SYSTEM
 if SYSTEM == "ipex":
     import intel_extension_for_pytorch as ipex
 
+if SYSTEM == "hpu":
+    import habana_frameworks.torch as htorch
+
 
 class LayerConcat(torch.nn.Module):
     """
@@ -95,6 +98,8 @@ class TensorParallelHead(SuperLayer):
                     world_out, gather_input, group=self.process_group
                 )
             else:
+                if SYSTEM == "hpu":
+                    htorch.core.mark_step()
                 torch.distributed.all_gather_into_tensor(
                     world_out, gather_input, group=self.process_group
                 )
@@ -110,6 +115,8 @@ class TensorParallelHead(SuperLayer):
         if SYSTEM == "ipex":
             ipex.distributed.all_gather(world_output, output, group=self.process_group)
         else:
+            if SYSTEM == "hpu":
+                htorch.core.mark_step()
             torch.distributed.all_gather(world_output, output, group=self.process_group)
         world_output = torch.cat(world_output, dim=-1)
         return world_output
@@ -205,6 +212,11 @@ class TensorParallelRowLinear(SuperLayer):
             if SYSTEM == "ipex":
                 ipex.distributed.all_reduce(out, group=self.process_group)
             else:
+                if SYSTEM == "hpu":
+                    # FIXME(kzawora): this is a workaround for a bug in Habana PT bridge
+                    # occurring when PT_HPU_ENABLE_LAZY_COLLECTIVES=true env var is used
+                    # (which is required for tensor parallel HPUGraph inference)
+                    htorch.core.mark_step()
                 torch.distributed.all_reduce(out, group=self.process_group)
         return out
 
@@ -245,5 +257,10 @@ class TensorParallelEmbedding(torch.nn.Module):
             if SYSTEM == "ipex":
                 ipex.distributed.all_reduce(out, group=self.process_group)
             else:
+                if SYSTEM == "hpu":
+                    # FIXME(kzawora): this is a workaround for a bug in Habana PT bridge
+                    # occurring when PT_HPU_ENABLE_LAZY_COLLECTIVES=true env var is used
+                    # (which is required for tensor parallel HPUGraph inference)
+                    htorch.core.mark_step()
                 torch.distributed.all_reduce(out, group=self.process_group)
         return out
