@@ -84,7 +84,6 @@ def initialize_torch_distributed():
                     pg_options=options,
                 )
             elif SYSTEM == "hpu":
-                device = torch.device(f"hpu:{RANK}")
                 torch.distributed.init_process_group(
                     backend="hccl",
                     world_size=WORLD_SIZE,

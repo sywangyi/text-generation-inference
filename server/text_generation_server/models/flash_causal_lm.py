@@ -1402,7 +1402,7 @@ class FlashCausalLM(Model):
                 dtype = torch.bfloat16 if dtype is None else dtype
                 init_cpu_threads_env(rank_id=rank, world_size=world_size)
         elif SYSTEM == "hpu":
-            device = torch.device(f"hpu:{rank}")
+            device = torch.device("hpu")
             dtype = torch.bfloat16 if dtype is None else dtype
         else:
             raise NotImplementedError(f"{model_class} is only available on GPU")
