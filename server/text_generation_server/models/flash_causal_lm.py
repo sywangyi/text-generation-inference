@@ -973,7 +973,7 @@ class FlashCausalLMBatch(Batch):
             hpu_attn_meta=None,
         )
 
-    def prepare_for_decode(self, dtype):
+    def prepare_for_decode(self, dtype, use_contiguous_pa):
         # Prepare values if we need to continue decoding
         # need for HPUPagedAttentionMetadata preparation
         import itertools
@@ -982,8 +982,14 @@ class FlashCausalLMBatch(Batch):
         def flatten(in_list):
             return list(itertools.chain(*in_list))
 
-        def padding_fn(input, indices, v):
+        def gather_list(input, indices, v):
             return [input[i] if i is not None else v for i in indices]
+
+        def pad_list(input, k, v):
+            input_len = len(input)
+            target_len = (input_len + k - 1) // k * k
+            padding = target_len - input_len
+            return input + [v] * padding
 
         device = self.block_tables_tensor.device
         last_block_usage = self.slots[self.slot_indices] % BLOCK_SIZE + 1
@@ -1005,18 +1011,22 @@ class FlashCausalLMBatch(Batch):
 
         assert len(block_list) == len(block_groups)
         assert len(block_list) == len(block_usage)
-
-        block_bucket_size = max(max(block_list) + 1, len(block_list))
-        #     block_bucket_size = self.bucketing_ctx.get_padded_decode_num_blocks(
-        #         block_bucket_size)
-        indices: List[Any]
-        indices = [None] * block_bucket_size
-        for i, bid in enumerate(block_list):
-            indices[bid] = i
-
-        block_list = padding_fn(block_list, indices, 0)
-        block_groups = padding_fn(block_groups, indices, -1)
-        block_usage = padding_fn(block_usage, indices, 1)
+        if use_contiguous_pa:
+            block_bucket_size = max(max(block_list) + 1, len(block_list))
+            #     block_bucket_size = self.bucketing_ctx.get_padded_decode_num_blocks(
+            #         block_bucket_size)
+            indices: List[Any]
+            indices = [None] * block_bucket_size
+            for i, bid in enumerate(block_list):
+                indices[bid] = i
+            block_list = gather_list(block_list, indices, 0)
+            block_groups = gather_list(block_groups, indices, -1)
+            block_usage = gather_list(block_usage, indices, 1)
+        else:
+            block_bucket_size = len(block_list)
+            block_list = pad_list(block_list, block_bucket_size, 0)
+            block_groups = pad_list(block_groups, block_bucket_size, -1)
+            block_usage = pad_list(block_usage, block_bucket_size, 1)
 
         block_list = torch.tensor(block_list, dtype=torch.int, device=device)
         block_groups = torch.tensor(block_groups, dtype=torch.int, device=device)
@@ -1500,6 +1510,9 @@ class FlashCausalLM(Model):
             if htorch.utils.internal.is_lazy():
                 htorch.hpu.wrap_in_hpu_graph(model, disable_tensor_cache=True)
             environment.set_model_config(self.config)
+            self.use_contiguous_pa = (
+                os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() == "true"
+            )
         super().__init__(
             model_id=model_id,
             model=model,
@@ -2084,7 +2097,7 @@ class FlashCausalLM(Model):
         if prefill:
             batch.prepare_for_prefill()
         else:
-            batch.prepare_for_decode(self.dtype)
+            batch.prepare_for_decode(self.dtype, self.use_contiguous_pa)
 
         prefill_logprobs = batch.prefill_next_token_indices is not None
 

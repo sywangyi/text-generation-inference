@@ -6,12 +6,16 @@ from vllm_hpu_extension import ops
 from vllm_hpu_extension.utils import Matmul
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
 from vllm_hpu_extension.utils import ModuleFusedSDPA
+import os
 
 SUPPORTS_WINDOWING = False
 
 
 def fetch_from_cache(cache, blocks):
-    return cache[: blocks.size(0)]
+    if os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() == "true":
+        return cache[: blocks.size(0)]
+    else:
+        return cache.index_select(0, blocks)
 
 
 def attention(

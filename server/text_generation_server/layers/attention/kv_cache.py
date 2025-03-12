@@ -115,12 +115,12 @@ class KVCache:
             )
         elif SYSTEM == "hpu":
             self.kv_cache = (
-                torch.empty(
+                torch.zeros(
                     (num_blocks, BLOCK_SIZE, num_heads, head_size),
                     dtype=dtype,
                     device=device,
                 ),
-                torch.empty(
+                torch.zeros(
                     (num_blocks, BLOCK_SIZE, num_heads, head_size),
                     dtype=dtype,
                     device=device,
