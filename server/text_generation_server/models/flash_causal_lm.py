@@ -2036,6 +2036,10 @@ class FlashCausalLM(Model):
                 )
                 if batch.prefill_cache_indices is not None:
                     batch.prefill_cache_indices = None
+                if SYSTEM == "hpu":
+                    # fix following runtime error in graph replay
+                    # RuntimeError: Neither storage attached to input tensor, not its view
+                    htorch.core.mark_step()
                 return logits, speculative_logits
 
         # Copy inputs to the static inputs of the cuda graph
