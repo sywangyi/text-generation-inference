@@ -80,7 +80,7 @@ class KVCache:
                 )
             if device.type == "cpu" and dtype == torch.float8_e4m3fn:
                 raise ValueError(
-                    "float8_e4m3fn FP8 KV cache is not supported on Intel CPU"
+                    "float8_e4m3fn FP8 KV cache is not supported on Intel IPEX CPU"
                 )
 
         element_size = torch.tensor([], dtype=dtype).element_size()
