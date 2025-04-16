@@ -71,6 +71,7 @@ import vllm_hpu_extension.environment as environment
 import habana_frameworks.torch as htorch
 import itertools
 from vllm_hpu_extension.bucketing import HPUBucketingContext
+import copy
 
 tracer = trace.get_tracer(__name__)
 
@@ -847,7 +848,12 @@ class FlashCausalLMBatch(Batch):
 
             slots_start_index = cumulative_slots
             slots_end_index = cumulative_slots + len(batch.slots)
-            slots[slots_start_index:slots_end_index] = batch.slots
+            slot_index = torch.tensor(
+                list(range(slots_start_index, slots_end_index)),
+                device=batch.input_ids.device,
+            )
+
+            slots.index_copy_(0, slot_index, batch.slots)
             cu_slots[start_index + 1 : end_index + 1] = (
                 batch.cu_slots[1:] + cumulative_slots
             )
@@ -1527,6 +1533,81 @@ class FlashCausalLM(Model):
 
         return int(num_blocks * BLOCK_SIZE), max_input_tokens, max_total_tokens
 
+    def generate_dummy_batch_for_prefill(
+        self, batch_ref: FlashCausalLMBatch, seq_len: int, batch_size: int
+    ):
+        batch = copy.deepcopy(batch_ref)
+        batch.input_ids = [[0] * seq_len] * batch_size
+        # Output 2 tokens
+        batch.all_input_ids = [[0] * (seq_len + 2)] * batch_size
+        batch.all_input_ids_tensor = torch.tensor(
+            batch.all_input_ids, dtype=torch.int64, device=self.device
+        )
+        batch.input_lengths = [seq_len] * batch_size
+        batch.cache_lengths = [0] * batch_size
+        batch.prompt_lengths = [seq_len] * batch_size
+        batch.prompt_lengths_tensor = torch.tensor(
+            batch.prompt_lengths, dtype=torch.int32, device=self.device
+        )
+        batch.prefix_offsets = [i - 5 for i in batch.input_lengths]
+        batch.read_offsets = batch.input_lengths
+        blocks_per_batch = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        batch.num_blocks = blocks_per_batch * batch_size
+        batch.max_blocks = batch.num_blocks
+        batch.max_current_length = seq_len
+        batch.max_input_length = seq_len
+        batch.prefilling = True
+        batch.prefilling_mask = [True] * batch_size
+        batch.next_token_logits = None
+        batch.speculative_logits = None
+
+        for i in range(batch_size):
+            if len(batch.stopping_criterias) == i:
+                batch.stopping_criterias.append(batch.stopping_criterias[0])
+            if len(batch.top_n_tokens) == i:
+                batch.top_n_tokens.append(batch.top_n_tokens[0])
+            batch.stopping_criterias[i].max_new_tokens = 2
+        batch.top_n_tokens_tensor = torch.tensor(
+            batch.top_n_tokens, device=self.device, dtype=torch.int64
+        )
+        next_token_chooser_parameters = []
+        for i in range(batch_size):
+            if len(batch.requests) == i:
+                batch.requests.append(batch.requests[0])
+        next_token_chooser_parameters.extend([r.parameters for r in batch.requests])
+        batch.next_token_chooser = HeterogeneousNextTokenChooser.from_pb(
+            next_token_chooser_parameters,
+            dtype=batch.next_token_chooser.dtype,
+            device=batch.next_token_chooser.device,
+            tokenizer=batch.next_token_chooser.tokenizer,
+            fsm_grammar_states=batch.next_token_chooser.fsm_grammar_states,
+        )
+
+        num_blocks = 0
+        block_tables = []
+        slots = []
+        cu_slots = [0]
+        for i in range(batch_size):
+            request_blocks = [
+                b for b in range(num_blocks, num_blocks + blocks_per_batch)
+            ]
+            block_tables.append(request_blocks)
+            num_blocks += blocks_per_batch
+            request_slots = [
+                s
+                for b in request_blocks
+                for s in range(b * BLOCK_SIZE, (b + 1) * BLOCK_SIZE)
+            ]
+            slots.extend(request_slots)
+            cu_slots.append(len(slots))
+        batch.block_tables = block_tables
+        batch.block_tables_tensor = torch.tensor(
+            block_tables, dtype=torch.int32, device=self.device
+        )
+        batch.slots = torch.tensor(slots, dtype=torch.int32, device=self.device)
+        batch.cu_slots = torch.tensor(cu_slots, dtype=torch.int64)
+        return batch
+
     def warmup_hpu_graph(self, batch):
         warmup_times = 3
         self.bucketing_ctx.generate_prompt_buckets()
@@ -1535,7 +1616,14 @@ class FlashCausalLM(Model):
         ):
             log_master(logger.info, f"warmup prefill seq {seq_len} bs {batch_size}")
             for index in range(warmup_times):
+                dummy_batch = self.generate_dummy_batch_for_prefill(
+                    batch, seq_len, batch_size
+                )
+                _, _batch, _ = self.generate_token([dummy_batch])
+                _, _batch, _ = self.generate_token([_batch])
+                """
                 self.warmup_prefill(seq_len, batch_size, batch)
+                """
         self.bucketing_ctx.generate_decode_buckets(self.bucketing_ctx.num_hpu_blocks)
         for i, (batch_size, block_num) in enumerate(
             reversed(self.bucketing_ctx.decode_buckets)
