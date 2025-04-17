@@ -460,69 +460,30 @@ class FlashMllamaCausalLM(FlashVlmCausalLM):
             slots_pad = torch.zeros_like(input_ids)
             slots_pad[batch.prefill_cache_indices] = slots
             slots = slots_pad
-
-        if self.bucketing_ctx is not None:
-            if batch.prefilling:
-                padded_bs = self.bucketing_ctx.get_padded_prompt_batch_size(
-                    input_lengths.shape[0]
-                )
-            else:
-                padded_bs = self.bucketing_ctx.get_padded_decode_batch_size(
-                    input_lengths.shape[0]
-                )
         else:
-            padded_bs = input_lengths.shape[0]
-        orig_bs = input_lengths.shape[0]
-        padded_input_len = input_ids.view(orig_bs, -1).shape[-1]
+            slots_pad = torch.zeros_like(input_ids)
+            slots_pad[: slots.shape[0]] = slots
+            slots = slots_pad
+        orig_bs = len(batch)
+        padded_bs = batch.input_lengths_tensor.shape[0]
+        padded_input_len = input_ids.view(padded_bs, -1).shape[-1]
         image_indices = torch.tensor(batch.image_indices, device=self.device)
-        if padded_bs != input_lengths.shape[0]:
-            padded_input_lengths = F.pad(
-                input_lengths,
-                (0, padded_bs - orig_bs),
-                value=0,
-            )
-            padded_cache_lengths_tensor = F.pad(
-                cache_lengths_tensor,
-                (0, padded_bs - orig_bs),
-                value=0,
-            )
-            if cu_seqlen_prefill is not None:
-                cu_seqlen_prefill = torch.zeros(
-                    padded_bs + 1, device=self.device, dtype=torch.int32
-                )
-                torch.cumsum(padded_input_lengths, -1, out=cu_seqlen_prefill[1:])
-            seqlen = Seqlen(
-                input_lengths=padded_input_lengths,
-                cache_lengths=padded_cache_lengths_tensor,
-                cu_seqlen_q=cu_seqlen_prefill,
-            )
 
-            input_ids = F.pad(
-                input_ids, (0, (padded_bs - orig_bs) * padded_input_len), value=0
+        if cross_attention_states is not None:
+            cross_attention_states = F.pad(
+                cross_attention_states,
+                (0, 0, 0, 0, 0, (padded_bs - orig_bs)),
+                value=0,
             )
-            position_ids = F.pad(
-                position_ids, (0, (padded_bs - orig_bs) * padded_input_len), value=1
-            )
-            slots = F.pad(slots, (0, (padded_bs - orig_bs) * padded_input_len), value=0)
-            if lm_head_indices is not None:
-                lm_head_indices = F.pad(
-                    lm_head_indices, (0, padded_bs - orig_bs), value=0
-                )
-            if cross_attention_states is not None:
-                cross_attention_states = F.pad(
-                    cross_attention_states,
-                    (0, 0, 0, 0, 0, (padded_bs - orig_bs)),
-                    value=0,
-                )
-            if len(image_indices) != 0:
-                pad_indices = torch.arange(orig_bs, padded_bs, device=self.device)
-                image_indices = torch.cat((image_indices, pad_indices), dim=0)
-        else:
-            seqlen = Seqlen(
-                input_lengths=input_lengths,
-                cache_lengths=cache_lengths_tensor,
-                cu_seqlen_q=cu_seqlen_prefill,
-            )
+        if len(image_indices) != 0:
+            pad_indices = torch.arange(orig_bs, padded_bs, device=self.device)
+            image_indices = torch.cat((image_indices, pad_indices), dim=0)
+
+        seqlen = Seqlen(
+            input_lengths=input_lengths,
+            cache_lengths=cache_lengths_tensor,
+            cu_seqlen_q=cu_seqlen_prefill,
+        )
 
         indices, cross_attention_len = generate_cross_attention_states(
             cross_attention_states,
@@ -549,6 +510,4 @@ class FlashMllamaCausalLM(FlashVlmCausalLM):
         )
         if batch.pixel_values is not None:
             batch.pixel_values = None
-        return logits[:orig_bs], (
-            speculative_logits[:orig_bs] if speculative_logits is not None else None
-        )
+        return logits, speculative_logits

@@ -22,7 +22,6 @@ import habana_frameworks.torch as htorch
 from text_generation_server.utils.import_utils import (
     synchronize,
 )
-import torch.nn.functional as F
 
 tracer = trace.get_tracer(__name__)
 
@@ -546,69 +545,16 @@ class FlashVlmCausalLM(FlashCausalLM):
             slots_pad = torch.zeros_like(input_ids)
             slots_pad[batch.prefill_cache_indices] = slots
             slots = slots_pad
-        if self.bucketing_ctx is not None:
-            if batch.prefilling:
-                padded_bs = self.bucketing_ctx.get_padded_prompt_batch_size(
-                    input_lengths.shape[0]
-                )
-            else:
-                padded_bs = self.bucketing_ctx.get_padded_decode_batch_size(
-                    input_lengths.shape[0]
-                )
         else:
-            padded_bs = input_lengths.shape[0]
-        orig_bs = input_lengths.shape[0]
-        if padded_bs != input_lengths.shape[0]:
-            padded_input_lengths = F.pad(
-                input_lengths,
-                (0, padded_bs - orig_bs),
-                value=0,
-            )
-            padded_cache_lengths_tensor = F.pad(
-                cache_lengths_tensor,
-                (0, padded_bs - orig_bs),
-                value=0,
-            )
-            if cu_seqlen_prefill is not None:
-                cu_seqlen_prefill = torch.zeros(
-                    padded_bs + 1, device=self.device, dtype=torch.int32
-                )
-                torch.cumsum(padded_input_lengths, -1, out=cu_seqlen_prefill[1:])
-            seqlen = Seqlen(
-                input_lengths=padded_input_lengths,
-                cache_lengths=padded_cache_lengths_tensor,
-                cu_seqlen_q=cu_seqlen_prefill,
-            )
-            input_seq = input_ids.view(orig_bs, -1)
-            input_ids = F.pad(
-                input_ids, (0, (padded_bs - orig_bs) * input_seq.shape[-1]), value=0
-            )
-            if position_ids.dim() == 2:
-                # qwen2_vl and qwen2_5_vl case
-                position_ids = F.pad(
-                    position_ids,
-                    (0, 0, 0, (padded_bs - orig_bs) * input_seq.shape[-1]),
-                    value=1,
-                )
-            else:
-                position_ids = F.pad(
-                    position_ids,
-                    (0, (padded_bs - orig_bs) * input_seq.shape[-1]),
-                    value=1,
-                )
-            slots = F.pad(
-                slots, (0, (padded_bs - orig_bs) * input_seq.shape[-1]), value=0
-            )
-            if lm_head_indices is not None:
-                lm_head_indices = F.pad(
-                    lm_head_indices, (0, padded_bs - orig_bs), value=0
-                )
-        else:
-            seqlen = Seqlen(
-                input_lengths=input_lengths,
-                cache_lengths=cache_lengths_tensor,
-                cu_seqlen_q=cu_seqlen_prefill,
-            )
+            slots_pad = torch.zeros_like(input_ids)
+            slots_pad[: slots.shape[0]] = slots
+            slots = slots_pad
+
+        seqlen = Seqlen(
+            input_lengths=input_lengths,
+            cache_lengths=cache_lengths_tensor,
+            cu_seqlen_q=cu_seqlen_prefill,
+        )
         logits, speculative_logits = self.model.forward(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -632,6 +578,4 @@ class FlashVlmCausalLM(FlashCausalLM):
             batch.image_sizes = None
         if batch.image_grid_thw is not None:
             batch.image_grid_thw = None
-        return logits[:orig_bs], (
-            speculative_logits[:orig_bs] if speculative_logits is not None else None
-        )
+        return logits, speculative_logits
