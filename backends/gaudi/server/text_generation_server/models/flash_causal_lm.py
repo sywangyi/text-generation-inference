@@ -89,6 +89,15 @@ def get_sliding_windows() -> int:
     return SLIDING_WINDOW
 
 
+def _async_h2d_tensor_copy(source, device="hpu"):
+    if source is None:
+        return None
+    assert source.device.type == "cpu", "Source tensor is not present in host memory!"
+    target = torch.empty(source.shape, dtype=source.dtype, device=device)
+    target.copy_(source, non_blocking=True)
+    return target
+
+
 def prepare_for_decode(
     dtype, use_contiguous_pa, device, slots, block_tables, batch_size, bucketing_ctx
 ):
@@ -142,18 +151,23 @@ def prepare_for_decode(
         block_groups = pad_list(block_groups, block_bucket_size, -1)
         block_usage = pad_list(block_usage, block_bucket_size, 1)
 
-    block_list = torch.tensor(block_list, dtype=torch.int, device=device)
-    block_groups = torch.tensor(block_groups, dtype=torch.int, device=device)
-    block_usage = torch.tensor(block_usage, dtype=dtype, device=device)
-    block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch_size)
+    block_list = torch.tensor(block_list, dtype=torch.int, device="cpu")
+    block_groups = torch.tensor(block_groups, dtype=torch.int, device="cpu")
+    block_usage = torch.tensor(block_usage, dtype=dtype, device="cpu")
+    block_list_device = _async_h2d_tensor_copy(block_list)
+    block_groups_device = _async_h2d_tensor_copy(block_groups)
+    block_usage_device = _async_h2d_tensor_copy(block_usage)
+    block_mapping = torch.nn.functional.one_hot(
+        block_groups_device, num_classes=batch_size
+    )
     mask = torch.arange(0, BLOCK_SIZE, device=device, dtype=torch.int32).unsqueeze(0)
     mask = mask >= block_usage.unsqueeze(-1)
     attn_bias = torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf)
     return trim_attn_metadata(
         HPUPagedAttentionMetadata(
-            block_list=block_list,
-            block_groups=block_groups,
-            block_usage=block_usage,
+            block_list=block_list_device,
+            block_groups=block_groups_device,
+            block_usage=block_usage_device,
             block_mapping=block_mapping.to(dtype),
             attn_bias=attn_bias,
         )
@@ -427,24 +441,19 @@ class FlashCausalLMBatch(Batch):
             top_n_tokens, device=device, dtype=torch.int64
         )
 
-        block_tables_ragged = torch.tensor(
-            block_tables_ragged, device=device, dtype=torch.int32
-        )
-        cu_blocks = torch.tensor(cu_blocks, device=device, dtype=torch.int64)
+        block_tables_ragged = torch.tensor(block_tables_ragged, dtype=torch.int32)
+        cu_blocks = torch.tensor(cu_blocks, dtype=torch.int64)
         block_tables_tensor = torch.empty(
             (len(block_tables), max_blocks),
-            device=device,
             dtype=torch.int32,
         )
 
         for i, request_blocks in enumerate(block_tables):
             block_tables_tensor[i, : len(request_blocks)] = torch.tensor(request_blocks)
 
-        prompt_lengths_tensor = torch.tensor(
-            prompt_lengths, dtype=torch.int32, device=device
-        )
+        prompt_lengths_tensor = torch.tensor(prompt_lengths, dtype=torch.int32)
 
-        slots = torch.tensor(slots, dtype=torch.int64, device=device)
+        slots = torch.tensor(slots, dtype=torch.int64)
         cu_slots = torch.tensor(cu_slots, dtype=torch.int64)
 
         return cls(
@@ -522,9 +531,7 @@ class FlashCausalLMBatch(Batch):
         indices = []
 
         # slots to keep after filtering
-        slot_filtering_indices = torch.zeros(
-            self.slots.shape[0], dtype=torch.bool, device=device
-        )
+        slot_filtering_indices = torch.zeros(self.slots.shape[0], dtype=torch.bool)
 
         # Create on CPU to only move to GPU once instead of at every copy
         slot_indices = torch.empty(len(request_ids), dtype=torch.int64)
@@ -642,9 +649,7 @@ class FlashCausalLMBatch(Batch):
             slot_indices = slot_indices.to(device)
 
             adapter_segments, adapter_segment_indices = find_segments(adapter_indices)
-            adapter_segments = torch.tensor(
-                adapter_segments, dtype=torch.int32, device=device
-            )
+            adapter_segments = torch.tensor(adapter_segments, dtype=torch.int32)
             adapter_meta = AdapterBatchMetadata(
                 adapter_indices=adapter_indices,
                 adapter_set=adapter_set,
@@ -841,7 +846,7 @@ class FlashCausalLMBatch(Batch):
             slots_end_index = cumulative_slots + len(batch.slots)
             slot_index = torch.tensor(
                 list(range(slots_start_index, slots_end_index)),
-                device=batch.input_ids.device,
+                device=batch.slots.device,
             )
 
             slots.index_copy_(0, slot_index, batch.slots)
@@ -988,8 +993,8 @@ class FlashCausalLMBatch(Batch):
         self.hpu_attn_meta = prepare_for_decode(
             dtype,
             use_contiguous_pa,
-            self.block_tables_tensor.device,
-            slots.cpu(),
+            "hpu",
+            slots,
             block_tables,
             padded_bs,
             bucketing_ctx,
@@ -997,7 +1002,7 @@ class FlashCausalLMBatch(Batch):
         self.input_ids = F.pad(self.input_ids, (0, extra_pad), value=0)
         self.position_ids = F.pad(self.position_ids, (0, extra_pad), value=1)
         self.input_lengths_tensor = F.pad(
-            self.input_lengths_tensor, (0, extra_pad), value=1
+            self.input_lengths_tensor, (0, extra_pad), value=0
         )
         self.cache_lengths_tensor = F.pad(
             self.cache_lengths_tensor, (0, extra_pad), value=0
@@ -1030,7 +1035,7 @@ class FlashCausalLMBatch(Batch):
         # it simplifies everything
         assert self.speculative_ids is None
 
-        device = self.block_tables_tensor.device
+        # device = self.block_tables_tensor.device
 
         # hpu does not support varlen for prefill, use sdpa instead. so need to pad input_tensor, position
         # padding to left to work with sliding window
@@ -1050,12 +1055,12 @@ class FlashCausalLMBatch(Batch):
                 input_ids.append(input_id)
                 input_ids_padded_length.append(padded)
             input_ids = np.concatenate(input_ids, dtype=np.int64)
-            self.input_ids = torch.tensor(input_ids, dtype=torch.int64, device=device)
+            self.input_ids = torch.tensor(input_ids, dtype=torch.int64)
         elif isinstance(self.input_ids, list):
             input_ids = self.input_ids[0]
             input_ids_padded_length.append(extra_pad)
             input_ids = [0] * extra_pad + input_ids
-            self.input_ids = torch.tensor(input_ids, dtype=torch.int64, device=device)
+            self.input_ids = torch.tensor(input_ids, dtype=torch.int64)
         else:
             self.input_ids = F.pad(self.input_ids, (extra_pad, 0), value=0)
             input_ids_padded_length.append(extra_pad)
@@ -1064,20 +1069,16 @@ class FlashCausalLMBatch(Batch):
             self.input_ids, (0, extra_pad_bs * max_padded_input_len), value=0
         )
 
-        self.input_lengths_tensor = torch.tensor(
-            self.input_lengths, dtype=torch.int32, device=device
-        )
+        self.input_lengths_tensor = torch.tensor(self.input_lengths, dtype=torch.int32)
 
         self.input_lengths_tensor = F.pad(
-            self.input_lengths_tensor, (0, extra_pad_bs), value=1
+            self.input_lengths_tensor, (0, extra_pad_bs), value=0
         )
 
         cu_seqlen_prefill = self.input_lengths_tensor.new_zeros(max_padded_bs + 1)
         torch.cumsum(self.input_lengths_tensor, out=cu_seqlen_prefill[1:], dim=0)
         self.cu_seqlen_prefill = cu_seqlen_prefill.to(torch.int32)
-        self.cache_lengths_tensor = torch.tensor(
-            self.cache_lengths, dtype=torch.int32, device=device
-        )
+        self.cache_lengths_tensor = torch.tensor(self.cache_lengths, dtype=torch.int32)
         self.cache_lengths_tensor = F.pad(
             self.cache_lengths_tensor, (0, extra_pad_bs), value=0
         )
@@ -1245,15 +1246,15 @@ class FlashCausalLMBatch(Batch):
                 slot_indices = slot_indices[0]
             prefill_cache_indices = prefill_cache_indices[0]
 
-        self.position_ids = position_ids.to(device)
+        self.position_ids = position_ids
         self.position_ids = F.pad(
             self.position_ids, (0, extra_pad_bs * max_padded_input_len), value=1
         )
-        self.slot_indices = slot_indices.to(device)
+        self.slot_indices = slot_indices
 
         self.prefill_cu_outlens = prefill_cu_outlens
         self.prefill_cache_indices = torch.zeros_like(self.input_ids, dtype=torch.bool)
-        self.prefill_cache_indices[prefill_cache_indices.to(device)] = True
+        self.prefill_cache_indices[prefill_cache_indices] = True
 
         if all_prefill_logprobs:
             prefill_head_indices = None
@@ -1262,15 +1263,15 @@ class FlashCausalLMBatch(Batch):
             prefill_head_indices = self.cu_seqlen_prefill[1:] - 1
             prefill_next_token_indices = None
         else:
-            prefill_head_indices = torch.cat(prefill_head_indices).to(device)
+            prefill_head_indices = torch.cat(prefill_head_indices)
             prefill_next_token_indices = torch.tensor(
-                prefill_next_token_indices, dtype=torch.int64, device=device
+                prefill_next_token_indices, dtype=torch.int64
             )
 
         self.prefill_head_indices = prefill_head_indices
         self.prefill_next_token_indices = prefill_next_token_indices
         input_ids_padded_length_tensor = torch.cumsum(
-            torch.tensor(input_ids_padded_length, dtype=torch.int64, device=device),
+            torch.tensor(input_ids_padded_length, dtype=torch.int64),
             dim=-1,
         )
         input_ids_padded_length_tensor = F.pad(
@@ -1309,18 +1310,14 @@ class FlashCausalLMBatch(Batch):
         )
 
         if adapter_set:
-            adapter_indices = torch.cat(adapter_indices_list).to(
-                dtype=torch.int64, device=device
-            )
+            adapter_indices = torch.cat(adapter_indices_list).to(dtype=torch.int64)
             adapter_segments, adapter_segment_indices = find_segments(adapter_indices)
         else:
             adapter_indices = torch.zeros_like(self.input_ids)
             adapter_segments = [0, len(adapter_indices)]
             adapter_segment_indices = [len(adapter_indices) - 1]
 
-        adapter_segments = torch.tensor(
-            adapter_segments, dtype=torch.int32, device=device
-        )
+        adapter_segments = torch.tensor(adapter_segments, dtype=torch.int32)
         self.adapter_meta = AdapterBatchMetadata(
             adapter_indices=adapter_indices,
             adapter_set=adapter_set,
@@ -1632,62 +1629,50 @@ class FlashCausalLM(Model):
     def warmup_prefill(
         self, prompt_len: int, batch_size: int, batch: FlashCausalLMBatch
     ):
-        input_ids = torch.zeros(
-            prompt_len, dtype=batch.input_ids.dtype, device=self.device
-        ).repeat(batch_size)
-        position_ids = torch.arange(
-            prompt_len, dtype=batch.position_ids.dtype, device=self.device
-        ).repeat(batch_size)
+        input_ids = torch.zeros(prompt_len, dtype=batch.input_ids.dtype).repeat(
+            batch_size
+        )
+        position_ids = torch.arange(prompt_len, dtype=batch.position_ids.dtype).repeat(
+            batch_size
+        )
         max_bt = (prompt_len // BLOCK_SIZE + 1) * batch_size
-        block_tables = torch.arange(
-            max_bt, dtype=torch.int32, device=self.device
-        ).reshape(batch_size, -1)
+        block_tables = torch.arange(max_bt, dtype=torch.int32).reshape(batch_size, -1)
         slot_acc = []
         for i in range(batch_size):
             slots = []
             for b in block_tables[i]:
                 slots.extend(range(b * BLOCK_SIZE, (b + 1) * BLOCK_SIZE))
             slot_acc.extend(slots[:prompt_len])
-        slots = torch.tensor(slot_acc, dtype=batch.slots.dtype, device=self.device)
+        slots = torch.tensor(slot_acc, dtype=batch.slots.dtype)
 
-        input_lengths = (
-            torch.ones(batch_size, dtype=torch.int32, device=self.device) * prompt_len
-        )
-        cache_lengths_tensor = torch.zeros(
-            batch_size, dtype=torch.int32, device=self.device
-        )
-        cu_seqlen_prefill = torch.zeros(
-            batch_size + 1, device=self.device, dtype=torch.int32
-        )
+        input_lengths = torch.ones(batch_size, dtype=torch.int32) * prompt_len
+        cache_lengths_tensor = torch.zeros(batch_size, dtype=torch.int32)
+        cu_seqlen_prefill = torch.zeros(batch_size + 1, dtype=torch.int32)
         torch.cumsum(input_lengths, -1, out=cu_seqlen_prefill[1:])
 
         seqlen = Seqlen(
-            input_lengths=input_lengths,
-            cache_lengths=cache_lengths_tensor,
-            cu_seqlen_q=cu_seqlen_prefill,
+            input_lengths=_async_h2d_tensor_copy(input_lengths),
+            cache_lengths=_async_h2d_tensor_copy(cache_lengths_tensor),
+            cu_seqlen_q=_async_h2d_tensor_copy(cu_seqlen_prefill),
         )
         lm_head_indices = input_lengths - 1
 
         # We pass a `cu_seqlen_prefill` in order not to have to deal with paged attention cache allocation/deallocation.
         self.model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            cu_seqlen_prefill=cu_seqlen_prefill,
+            input_ids=_async_h2d_tensor_copy(input_ids),
+            position_ids=_async_h2d_tensor_copy(position_ids),
+            cu_seqlen_prefill=_async_h2d_tensor_copy(cu_seqlen_prefill),
             kv_cache=self.kv_cache,
-            slots=slots,
+            slots=_async_h2d_tensor_copy(slots),
             seqlen=trim_seqlen_metadata(seqlen),
-            lm_head_indices=lm_head_indices,
+            lm_head_indices=_async_h2d_tensor_copy(lm_head_indices),
             adapter_data=None,
             hpu_attention_meta=None,
         )
 
     def warmup_decode(self, batch_size: int, block_num: int, batch: FlashCausalLMBatch):
-        input_ids = torch.zeros(
-            batch_size, dtype=batch.input_ids.dtype, device=self.device
-        )
-        position_ids = torch.arange(
-            batch_size, dtype=batch.position_ids.dtype, device=self.device
-        )
+        input_ids = torch.zeros(batch_size, dtype=batch.input_ids.dtype)
+        position_ids = torch.arange(batch_size, dtype=batch.position_ids.dtype)
         blocks = [block_num // batch_size for _ in range(batch_size)]
         blocks[0] += block_num % batch_size
         past_len = []
@@ -1702,19 +1687,15 @@ class FlashCausalLM(Model):
             block_tables.append(block_array)
             past_len.append(blocks[i] * BLOCK_SIZE - 1)
             start_idx += blocks[i]
-        input_lengths = torch.ones(batch_size, dtype=torch.int32, device=self.device)
-        cache_lengths_tensor = torch.tensor(
-            past_len, dtype=torch.int32, device=self.device
-        )
-        cu_seqlen_prefill = torch.zeros(
-            batch_size + 1, device=self.device, dtype=torch.int32
-        )
+        input_lengths = torch.ones(batch_size, dtype=torch.int32)
+        cache_lengths_tensor = torch.tensor(past_len, dtype=torch.int32)
+        cu_seqlen_prefill = torch.zeros(batch_size + 1, dtype=torch.int32)
         torch.cumsum(input_lengths, -1, out=cu_seqlen_prefill[1:])
 
         seqlen = Seqlen(
-            input_lengths=input_lengths,
-            cache_lengths=cache_lengths_tensor,
-            cu_seqlen_q=cu_seqlen_prefill,
+            input_lengths=_async_h2d_tensor_copy(input_lengths),
+            cache_lengths=_async_h2d_tensor_copy(cache_lengths_tensor),
+            cu_seqlen_q=_async_h2d_tensor_copy(cu_seqlen_prefill),
         )
 
         hpu_attention_meta = prepare_for_decode(
@@ -1726,14 +1707,14 @@ class FlashCausalLM(Model):
             batch_size,
             bucketing_ctx=None,
         )
-        slots_tensor = torch.tensor(slots, dtype=batch.slots.dtype, device=self.device)
+        slots_tensor = torch.tensor(slots, dtype=batch.slots.dtype)
         # We pass a `cu_seqlen_prefill` in order not to have to deal with paged attention cache allocation/deallocation.
         self.model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
+            input_ids=_async_h2d_tensor_copy(input_ids),
+            position_ids=_async_h2d_tensor_copy(position_ids),
             cu_seqlen_prefill=None,
             kv_cache=self.kv_cache,
-            slots=slots_tensor,
+            slots=_async_h2d_tensor_copy(slots_tensor),
             seqlen=trim_seqlen_metadata(seqlen),
             lm_head_indices=None,
             adapter_data=None,
@@ -1820,9 +1801,9 @@ class FlashCausalLM(Model):
             slots_pad[: slots.shape[0]] = slots
             slots = slots_pad
         seqlen = Seqlen(
-            input_lengths=input_lengths,
-            cache_lengths=cache_lengths_tensor,
-            cu_seqlen_q=cu_seqlen_prefill,
+            input_lengths=_async_h2d_tensor_copy(input_lengths),
+            cache_lengths=_async_h2d_tensor_copy(cache_lengths_tensor),
+            cu_seqlen_q=_async_h2d_tensor_copy(cu_seqlen_prefill),
         )
 
         kwargs = {}
@@ -1832,13 +1813,13 @@ class FlashCausalLM(Model):
             )
 
         logits, speculative_logits = self.model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            cu_seqlen_prefill=cu_seqlen_prefill,
+            input_ids=_async_h2d_tensor_copy(input_ids),
+            position_ids=_async_h2d_tensor_copy(position_ids),
+            cu_seqlen_prefill=_async_h2d_tensor_copy(cu_seqlen_prefill),
             kv_cache=kv_cache,
-            slots=slots,
+            slots=_async_h2d_tensor_copy(slots),
             seqlen=trim_seqlen_metadata(seqlen),
-            lm_head_indices=lm_head_indices,
+            lm_head_indices=_async_h2d_tensor_copy(lm_head_indices),
             # TODO not support adapter now, need the add in the future
             adapter_data=None,
             hpu_attention_meta=batch.hpu_attn_meta,
@@ -1928,6 +1909,7 @@ class FlashCausalLM(Model):
                     )
                 # For each member of the batch
                 # Cumulative length
+                accepted_ids = accepted_ids.cpu()
                 cu_accepted_ids = accepted_ids.new_zeros(accepted_ids.shape[0] + 1)
                 torch.cumsum(accepted_ids, dim=0, out=cu_accepted_ids[1:])
                 if batch.speculative_logits is not None:
@@ -1941,16 +1923,17 @@ class FlashCausalLM(Model):
                         ] = next_input_ids[cu_accepted_ids[i] : cu_accepted_ids[i + 1]]
                 else:
                     index = batch.cache_lengths_tensor + batch.input_lengths_tensor
+                    index = index.to(batch.all_input_ids_tensor)
                     batch_idx = torch.arange(
                         0,
                         batch.all_input_ids_tensor.shape[0],
                         dtype=torch.long,
-                        device=batch.input_lengths_tensor.device,
+                        device=batch.all_input_ids_tensor.device,
                     )
                     batch.all_input_ids_tensor.index_put_(
                         (batch_idx, index.long()), next_input_ids
                     )
-
+                next_input_ids = next_input_ids.cpu()
                 batch.input_ids = next_input_ids[cu_accepted_ids[1:] - 1]
                 batch.speculative_ids = speculative_ids
                 if batch.position_ids.dim() == 2:
@@ -1983,8 +1966,6 @@ class FlashCausalLM(Model):
                     }
                 )
                 idx = len(prev_batches) - 1
-                if batch.speculative_logits is not None:
-                    accepted_ids_cpu = accepted_ids.cpu()
 
                 for req_idx, req in enumerate(batch.requests):
                     new_input_length = 1
@@ -1992,7 +1973,7 @@ class FlashCausalLM(Model):
                         new_cache_length = (
                             batch.cache_lengths[req_idx]
                             + batch.input_lengths[req_idx]
-                            + accepted_ids_cpu[req_idx]
+                            + accepted_ids[req_idx]
                             - 1
                         )
                     else:
