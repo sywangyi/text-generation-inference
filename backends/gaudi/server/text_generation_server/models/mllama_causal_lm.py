@@ -455,7 +455,9 @@ class FlashMllamaCausalLM(FlashVlmCausalLM):
 
         kwargs = {}
         if htorch.utils.internal.is_lazy():
-            kwargs["bypass_hpu_graphs"] = batch.prefilling
+            kwargs["bypass_hpu_graphs"] = (
+                batch.prefilling if self.limit_hpu_graphs else False
+            )
         if batch.prefill_cache_indices is not None:
             slots_pad = torch.zeros_like(input_ids)
             slots_pad[batch.prefill_cache_indices] = slots

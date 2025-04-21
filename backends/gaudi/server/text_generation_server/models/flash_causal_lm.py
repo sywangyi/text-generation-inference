@@ -616,19 +616,7 @@ class FlashCausalLMBatch(Batch):
             max_blocks = max(max_blocks, len(request_block_table))
             max_slots = max(max_slots, slot_length)
 
-        #    all_input_ids_tensor = self.all_input_ids_tensor[indices]
-        #    next_token_logits = self.next_token_logits[indices]
-        #    speculative_logits = (
-        #        self.speculative_logits[indices]
-        #        if self.speculative_logits is not None
-        #        else None
-        #    )
         block_tables_tensor = self.block_tables_tensor[indices]
-        #   next_token_chooser = self.next_token_chooser.filter(indices)
-        #   top_n_tokens_tensor = self.top_n_tokens_tensor[indices]
-        #   speculative_ids = (
-        #      self.speculative_ids[indices] if self.speculative_ids is not None else None
-        #  )
         prompt_lengths_tensor = self.prompt_lengths_tensor[indices]
 
         cu_slots = torch.tensor(cu_slots, dtype=torch.int64)
@@ -1473,6 +1461,9 @@ class FlashCausalLM(Model):
         self.use_contiguous_pa = (
             os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() == "true"
         )
+        self.limit_hpu_graphs = (
+            os.environ.get("LIMIT_HPU_GRAPHS", "false").lower() == "true"
+        )
         super().__init__(
             model_id=model_id,
             model=model,
@@ -1590,8 +1581,15 @@ class FlashCausalLM(Model):
             self.device,
         )
 
+        max_num_seqs = int(os.getenv("MAX_BATCH_SIZE", 128))
+        if os.getenv("VLLM_PROMPT_SEQ_BUCKET_MAX") is None:
+            os.environ["VLLM_PROMPT_SEQ_BUCKET_MAX"] = str(max_input_tokens)
+        if os.getenv("VLLM_DECODE_BLOCK_BUCKET_MAX") is None:
+            max_total_blocks = math.ceil(max_total_tokens / BLOCK_SIZE) * max_num_seqs
+            os.environ["VLLM_DECODE_BLOCK_BUCKET_MAX"] = str(max_total_blocks)
+
         self.bucketing_ctx = HPUBucketingContext(
-            os.getenv("DECODE_MAX_BS", 128),  # self.max_num_seqs, #TODO
+            max_num_seqs,
             os.getenv("PREFILL_MAX_BS", 64),  # self.max_num_prefill_seqs, #TODO
             BLOCK_SIZE,
             num_blocks * BLOCK_SIZE,
@@ -1829,7 +1827,9 @@ class FlashCausalLM(Model):
 
         kwargs = {}
         if htorch.utils.internal.is_lazy():
-            kwargs["bypass_hpu_graphs"] = False
+            kwargs["bypass_hpu_graphs"] = (
+                batch.prefilling if self.limit_hpu_graphs else False
+            )
 
         logits, speculative_logits = self.model.forward(
             input_ids=input_ids,
