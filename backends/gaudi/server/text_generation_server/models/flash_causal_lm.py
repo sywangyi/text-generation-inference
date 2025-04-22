@@ -433,9 +433,7 @@ class FlashCausalLMBatch(Batch):
             all_input_ids_tensor[i, : len(input_ids)] = input_ids
 
         # Create tensors on device
-        all_input_ids_tensor = torch.tensor(
-            all_input_ids_tensor, dtype=torch.int64, device=device
-        )
+        all_input_ids_tensor = torch.tensor(all_input_ids_tensor, dtype=torch.int64)
 
         top_n_tokens_tensor = torch.tensor(
             top_n_tokens, device=device, dtype=torch.int64
@@ -1582,7 +1580,9 @@ class FlashCausalLM(Model):
         if os.getenv("VLLM_PROMPT_SEQ_BUCKET_MAX") is None:
             os.environ["VLLM_PROMPT_SEQ_BUCKET_MAX"] = str(max_input_tokens)
         if os.getenv("VLLM_DECODE_BLOCK_BUCKET_MAX") is None:
-            max_total_blocks = math.ceil(max_total_tokens / BLOCK_SIZE) * max_num_seqs
+            max_total_blocks = (
+                math.ceil(max_total_tokens / BLOCK_SIZE) * max_num_seqs + 1
+            )
             os.environ["VLLM_DECODE_BLOCK_BUCKET_MAX"] = str(max_total_blocks)
 
         self.bucketing_ctx = HPUBucketingContext(
@@ -1656,6 +1656,9 @@ class FlashCausalLM(Model):
             cu_seqlen_q=_async_h2d_tensor_copy(cu_seqlen_prefill),
         )
         lm_head_indices = input_lengths - 1
+        kwargs = {}
+        if htorch.utils.internal.is_lazy():
+            kwargs["bypass_hpu_graphs"] = self.limit_hpu_graphs
 
         # We pass a `cu_seqlen_prefill` in order not to have to deal with paged attention cache allocation/deallocation.
         self.model.forward(
@@ -1668,6 +1671,7 @@ class FlashCausalLM(Model):
             lm_head_indices=_async_h2d_tensor_copy(lm_head_indices),
             adapter_data=None,
             hpu_attention_meta=None,
+            **kwargs,
         )
 
     def warmup_decode(self, batch_size: int, block_num: int, batch: FlashCausalLMBatch):
@@ -1708,6 +1712,9 @@ class FlashCausalLM(Model):
             bucketing_ctx=None,
         )
         slots_tensor = torch.tensor(slots, dtype=batch.slots.dtype)
+        kwargs = {}
+        if htorch.utils.internal.is_lazy():
+            kwargs["bypass_hpu_graphs"] = False
         # We pass a `cu_seqlen_prefill` in order not to have to deal with paged attention cache allocation/deallocation.
         self.model.forward(
             input_ids=_async_h2d_tensor_copy(input_ids),
@@ -1719,6 +1726,7 @@ class FlashCausalLM(Model):
             lm_head_indices=None,
             adapter_data=None,
             hpu_attention_meta=hpu_attention_meta,
+            **kwargs,
         )
 
     def forward(
@@ -1912,6 +1920,7 @@ class FlashCausalLM(Model):
                 accepted_ids = accepted_ids.cpu()
                 cu_accepted_ids = accepted_ids.new_zeros(accepted_ids.shape[0] + 1)
                 torch.cumsum(accepted_ids, dim=0, out=cu_accepted_ids[1:])
+                next_input_ids = next_input_ids.cpu()
                 if batch.speculative_logits is not None:
                     for i in range(len(batch)):
                         batch.all_input_ids_tensor[
@@ -1933,7 +1942,6 @@ class FlashCausalLM(Model):
                     batch.all_input_ids_tensor.index_put_(
                         (batch_idx, index.long()), next_input_ids
                     )
-                next_input_ids = next_input_ids.cpu()
                 batch.input_ids = next_input_ids[cu_accepted_ids[1:] - 1]
                 batch.speculative_ids = speculative_ids
                 if batch.position_ids.dim() == 2:
