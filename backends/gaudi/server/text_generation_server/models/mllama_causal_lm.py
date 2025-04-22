@@ -340,6 +340,9 @@ class FlashMllamaCausalLM(FlashVlmCausalLM):
         indices, cross_attention_len = generate_cross_attention_states(
             cross_attention_states, image_indices, seqlen, prompt_len, True
         )
+        kwargs = {}
+        if htorch.utils.internal.is_lazy():
+            kwargs["bypass_hpu_graphs"] = self.limit_hpu_graphs
         self.model.forward(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -353,6 +356,7 @@ class FlashMllamaCausalLM(FlashVlmCausalLM):
             cross_attention_states=cross_attention_states,
             indices=indices,
             cross_attention_len=cross_attention_len,
+            **kwargs,
         )
 
     def warmup_hpu_graph(self, batch: FlashMllamaCausalLMBatch):
