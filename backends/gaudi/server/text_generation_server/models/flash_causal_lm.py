@@ -435,9 +435,7 @@ class FlashCausalLMBatch(Batch):
         # Create tensors on device
         all_input_ids_tensor = torch.tensor(all_input_ids_tensor, dtype=torch.int64)
 
-        top_n_tokens_tensor = torch.tensor(
-            top_n_tokens, device=device, dtype=torch.int64
-        )
+        top_n_tokens_tensor = torch.tensor(top_n_tokens, dtype=torch.int64)
 
         block_tables_ragged = torch.tensor(block_tables_ragged, dtype=torch.int32)
         cu_blocks = torch.tensor(cu_blocks, dtype=torch.int64)
@@ -826,7 +824,6 @@ class FlashCausalLMBatch(Batch):
             start_index = cumulative_batch_size
             end_index = cumulative_batch_size + valid_bsize
 
-            # Copy tensors (HPU)
             index = torch.tensor(
                 list(range(start_index, end_index)), device=batch.input_ids.device
             )
@@ -1506,10 +1503,12 @@ class FlashCausalLM(Model):
     ):
         import copy
 
+        max_new_tokens = 2
+
         batch = copy.deepcopy(batch_ref)
         batch.input_ids = [[0] * seq_len] * batch_size
         # Output 2 tokens
-        batch.all_input_ids = [[0] * (seq_len + 2)] * batch_size
+        batch.all_input_ids = [[0] * (seq_len + max_new_tokens)] * batch_size
         batch.all_input_ids_tensor = torch.tensor(
             batch.all_input_ids, dtype=torch.int64
         )
@@ -1521,7 +1520,7 @@ class FlashCausalLM(Model):
         )
         batch.prefix_offsets = [i - 5 for i in batch.input_lengths]
         batch.read_offsets = batch.input_lengths
-        blocks_per_batch = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        blocks_per_batch = (seq_len + max_new_tokens + BLOCK_SIZE - 1) // BLOCK_SIZE
         batch.num_blocks = blocks_per_batch * batch_size
         batch.max_blocks = batch.num_blocks
         batch.max_current_length = seq_len
@@ -1533,23 +1532,21 @@ class FlashCausalLM(Model):
         stopping_criterias = []
         top_n_tokens = []
         requests = []
-        batch.stopping_criterias[0].max_new_tokens = 2
+        batch.stopping_criterias[0].max_new_tokens = max_new_tokens
         for i in range(batch_size):
             stopping_criterias.append(batch.stopping_criterias[0])
             top_n_tokens.append(batch.top_n_tokens[0])
             requests.append(batch.requests[0])
         batch.stopping_criterias = stopping_criterias
         batch.top_n_tokens = top_n_tokens
-        batch.top_n_tokens_tensor = torch.tensor(
-            batch.top_n_tokens, device=self.device, dtype=torch.int64
-        )
+        batch.top_n_tokens_tensor = torch.tensor(batch.top_n_tokens, dtype=torch.int64)
         batch.requests = requests
         next_token_chooser_parameters = []
         next_token_chooser_parameters.extend([r.parameters for r in batch.requests])
         fsm_grammar_states = [0] * batch_size
 
-        for i, req in enumerate(self.requests):
-            fsm_grammar_states[i] = self.next_token_chooser.fsm_grammar_states[i]
+        for i, req in enumerate(batch.requests):
+            fsm_grammar_states[i] = batch.next_token_chooser.fsm_grammar_states[0]
         batch.next_token_chooser = HeterogeneousNextTokenChooser.from_pb(
             next_token_chooser_parameters,
             dtype=batch.next_token_chooser.dtype,
@@ -1575,11 +1572,112 @@ class FlashCausalLM(Model):
             slots.extend(request_slots)
             cu_slots.append(len(slots))
         batch.block_tables = block_tables
-        batch.block_tables_tensor = torch.tensor(
-            block_tables, dtype=torch.int32, device=self.device
-        )
-        batch.slots = torch.tensor(slots, dtype=torch.int32, device=self.device)
+        batch.block_tables_tensor = torch.tensor(block_tables, dtype=torch.int32)
+        batch.slots = torch.tensor(slots, dtype=torch.int64)
         batch.cu_slots = torch.tensor(cu_slots, dtype=torch.int64)
+        return batch
+
+    def generate_dummy_batch_for_decode(
+        self, batch_ref: FlashCausalLMBatch, batch_size: int, block_num: int
+    ):
+        import copy
+
+        max_new_tokens = 2
+        batch = copy.deepcopy(batch_ref)
+        batch.input_ids = torch.zeros(batch_size, dtype=torch.int64)
+        batch.position_ids = torch.zeros(batch_size, dtype=torch.int32)
+        blocks = [block_num // batch_size for _ in range(batch_size)]
+        blocks[0] += block_num % batch_size
+        past_len = []
+        block_tables = []
+        slots = []
+        start_idx = 0
+        slot_indices = []
+        cu_slots = [0]
+        all_input_ids = []
+        max_length = 0
+        slot_indices = []
+        for i in range(batch_size):
+            block_array = list(range(start_idx, start_idx + blocks[i]))
+            slot_array = list(
+                range(start_idx * BLOCK_SIZE, (start_idx + blocks[i]) * BLOCK_SIZE)
+            )
+            slots.extend(slot_array)
+            cu_slots.append(len(slots))
+            slot_indices.append(len(slots) - max_new_tokens)
+            block_tables.append(block_array)
+            past_len.append(blocks[i] * BLOCK_SIZE - max_new_tokens)
+            batch.position_ids[i] = past_len[i]
+            start_idx += blocks[i]
+            all_input_ids.append([0] * (past_len[i] + max_new_tokens))
+            max_length = max(max_length, past_len[i] + max_new_tokens)
+        batch.block_tables = block_tables
+        batch.block_tables_tensor = torch.tensor(block_tables, dtype=torch.int32)
+        batch.slots = torch.tensor(slots, dtype=torch.int64)
+        batch.cu_slots = torch.tensor(cu_slots, dtype=torch.int64)
+        # Output 2 tokens
+        batch.all_input_ids = all_input_ids
+        batch.slot_indices = torch.tensor(slot_indices, dtype=torch.int64)
+
+        all_input_ids_tensor = np.zeros(
+            (len(all_input_ids), max_length), dtype=np.int64
+        )
+        for i, input_ids in enumerate(all_input_ids):
+            all_input_ids_tensor[i, : len(input_ids)] = input_ids
+        batch.all_input_ids_tensor = torch.tensor(
+            all_input_ids_tensor, dtype=torch.int64
+        )
+        batch.input_lengths = [1] * batch_size
+        batch.input_lengths_tensor = torch.tensor(
+            batch.input_lengths, dtype=torch.int32
+        )
+        batch.cache_lengths = past_len
+        batch.cache_lengths_tensor = torch.tensor(
+            batch.cache_lengths, dtype=torch.int32
+        )
+        batch.prompt_lengths = past_len
+        batch.prompt_lengths_tensor = torch.tensor(
+            batch.prompt_lengths, dtype=torch.int32
+        )
+        batch.prefix_offsets = batch.cache_lengths
+        batch.read_offsets = [offset + 1 for offset in batch.prefix_offsets]
+        batch.num_blocks = block_num
+        batch.max_blocks = batch.num_blocks
+        batch.max_current_length = max(past_len) + 1
+        batch.max_input_length = 1
+        batch.prefilling = False
+        batch.prefilling_mask = [False] * batch_size
+        batch.next_token_logits = None
+        batch.speculative_logits = None
+        batch.speculative_ids = None
+        batch.prefill_cache_indices = None
+        batch.prefill_head_indices = None
+        batch.prefill_next_token_indices = None
+        stopping_criterias = []
+        top_n_tokens = []
+        requests = []
+        batch.stopping_criterias[0].max_new_tokens = max_new_tokens
+        for i in range(batch_size):
+            stopping_criterias.append(batch.stopping_criterias[0])
+            top_n_tokens.append(batch.top_n_tokens[0])
+            requests.append(batch.requests[0])
+        batch.stopping_criterias = stopping_criterias
+        batch.top_n_tokens = top_n_tokens
+        batch.top_n_tokens_tensor = torch.tensor(batch.top_n_tokens, dtype=torch.int64)
+        batch.requests = requests
+        next_token_chooser_parameters = []
+        next_token_chooser_parameters.extend([r.parameters for r in batch.requests])
+        fsm_grammar_states = [0] * batch_size
+
+        for i, req in enumerate(batch.requests):
+            fsm_grammar_states[i] = batch.next_token_chooser.fsm_grammar_states[0]
+        batch.next_token_chooser = HeterogeneousNextTokenChooser.from_pb(
+            next_token_chooser_parameters,
+            dtype=batch.next_token_chooser.dtype,
+            device=batch.next_token_chooser.device,
+            tokenizer=batch.next_token_chooser.tokenizer,
+            fsm_grammar_states=fsm_grammar_states,
+        )
         return batch
 
     def warmup(
@@ -1710,7 +1808,12 @@ class FlashCausalLM(Model):
                 logger.info, f"warmup decode bs {batch_size} block_num {block_num}"
             )
             for index in range(warmup_times):
-                self.warmup_decode(batch_size, block_num, batch)
+                dummy_batch = self.generate_dummy_batch_for_decode(
+                    batch, batch_size, block_num
+                )
+                _, _batch, _ = self.generate_token([dummy_batch])
+                _, _batch, _ = self.generate_token([_batch])
+                # self.warmup_decode(batch_size, block_num, batch)
         synchronize(self.device)
 
     def warmup_prefill(
@@ -1946,7 +2049,9 @@ class FlashCausalLM(Model):
                     accepted_ids,
                     speculative_ids,
                 ) = batch.next_token_chooser(
-                    batch.all_input_ids_tensor[:, : batch.max_current_length],
+                    _async_h2d_tensor_copy(
+                        batch.all_input_ids_tensor[:, : batch.max_current_length]
+                    ),
                     batch.next_token_logits,
                     speculate,
                     batch.speculative_ids,
@@ -1955,7 +2060,7 @@ class FlashCausalLM(Model):
 
                 batch_top_token_ids, batch_top_token_logprobs = batch_top_tokens(
                     batch.top_n_tokens,
-                    batch.top_n_tokens_tensor,
+                    _async_h2d_tensor_copy(batch.top_n_tokens_tensor),
                     logprobs,
                     accepted_ids,
                 )
