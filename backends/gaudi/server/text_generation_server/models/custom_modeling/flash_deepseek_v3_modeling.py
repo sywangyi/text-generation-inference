@@ -328,19 +328,6 @@ class DeepseekV3Attention(torch.nn.Module):
 
         key_pe = key_pe.view(-1, 1, self.qk_rope_head_dim)
         kv_c_normed = self.kv_a_layernorm(compressed_kv.contiguous())[0]
-        latent_vec_k = torch.concat(
-            (kv_c_normed, key_pe.view(-1, self.qk_rope_head_dim)), dim=-1
-        )
-        latent_vec_k = latent_vec_k.view(-1, self.qk_rope_head_dim + self.kv_lora_rank)
-        if cu_seqlen_prefill is not None:
-            latent_vec_k = latent_vec_k.unflatten(0, (slots.size(0), -1))
-
-        kv_cache.store(
-            key=latent_vec_k,
-            value=None,
-            slots=slots,
-            kv_scales=self.kv_scales,
-        )
 
         # Prefill
         if cu_seqlen_prefill is not None:
@@ -374,6 +361,21 @@ class DeepseekV3Attention(torch.nn.Module):
                 .reshape(batch_size, heads, head_dim)
             )
             self.rotary_emb(query_pe, key_pe, cos, sin)
+            latent_vec_k = torch.concat(
+                (kv_c_normed, key_pe.view(-1, self.qk_rope_head_dim)), dim=-1
+            )
+            latent_vec_k = latent_vec_k.view(
+                -1, self.qk_rope_head_dim + self.kv_lora_rank
+            )
+
+            latent_vec_k = latent_vec_k.unflatten(0, (slots.size(0), -1))
+
+            kv_cache.store(
+                key=latent_vec_k,
+                value=None,
+                slots=slots,
+                kv_scales=self.kv_scales,
+            )
 
             query[..., self.qk_nope_head_dim :] = query_pe
             key = torch.empty_like(query)
@@ -411,6 +413,20 @@ class DeepseekV3Attention(torch.nn.Module):
             # Decode
             query_nope, query_pe = self._q_proj_and_k_up_proj(hidden_states_or_q_c)
             self.rotary_emb(query_pe, key_pe, cos, sin)
+            latent_vec_k = torch.concat(
+                (kv_c_normed, key_pe.view(-1, self.qk_rope_head_dim)), dim=-1
+            )
+            latent_vec_k = latent_vec_k.view(
+                -1, self.qk_rope_head_dim + self.kv_lora_rank
+            )
+
+            kv_cache.store(
+                key=latent_vec_k,
+                value=None,
+                slots=slots,
+                kv_scales=self.kv_scales,
+            )
+
             query = torch.cat([query_nope, query_pe], dim=-1)
             attn_output = paged_attention_mla(
                 query,

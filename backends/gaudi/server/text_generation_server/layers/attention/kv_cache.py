@@ -167,7 +167,7 @@ class KVCompressCache(KVCache):
         if self.kv_cache.dtype == torch.float8_e4m3fn:
             key = torch.ops.hpu.cast_to_fp8_v2(
                 key, kv_scales.key_scale, False, False, torch.float8_e4m3fn
-            )
+            )[0]
         cache_ops.insert_or_update_cache(key, self.kv_cache, block_idx, block_offset)
 
 
