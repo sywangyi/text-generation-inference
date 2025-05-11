@@ -53,6 +53,7 @@ from text_generation_server.models.globals import (
 )
 from text_generation_server.layers.attention import (
     KVCache,
+    KVCompressCache,
     Seqlen,
     HPUPagedAttentionMetadata,
     trim_attn_metadata,
@@ -1480,16 +1481,27 @@ class FlashCausalLM(Model):
     ):
         self.kv_cache = []
         empty_cache()
-        self.kv_cache = [
-            KVCache(
-                num_blocks=num_blocks,
-                num_heads=num_heads,
-                head_size=head_size,
-                dtype=dtype,
-                device=device,
-            )
-            for _ in range(num_layers)
-        ]
+        if self.config.model_type == "deepseek_v3":
+            self.kv_cache = [
+                KVCompressCache(
+                    num_blocks=num_blocks,
+                    head_size=self.config.kv_lora_rank + self.config.qk_rope_head_dim,
+                    dtype=dtype,
+                    device=device,
+                )
+                for _ in range(num_layers)
+            ]
+        else:
+            self.kv_cache = [
+                KVCache(
+                    num_blocks=num_blocks,
+                    num_heads=num_heads,
+                    head_size=head_size,
+                    dtype=dtype,
+                    device=device,
+                )
+                for _ in range(num_layers)
+            ]
 
     def warmup(
         self,
@@ -1509,8 +1521,13 @@ class FlashCausalLM(Model):
         # Inspired by the original implementation in [vllm](https://github.com/vllm-project/vllm)
         # Calculate the number of blocks that can be allocated with the free memory
         dtype_size = torch.tensor([], dtype=self.kv_cache_dtype).element_size()
-        cache_block_size = BLOCK_SIZE * self.num_kv_heads * self.head_size
-        total_cache_size = self.num_layers * cache_block_size * 2 * dtype_size
+        if self.config.model_type == "deepseek_v3":
+            cache_block_size = BLOCK_SIZE * (
+                self.config.kv_lora_rank + self.config.qk_rope_head_dim
+            )
+        else:
+            cache_block_size = BLOCK_SIZE * self.num_kv_heads * self.head_size
+        total_cache_size = self.num_layers * cache_block_size * dtype_size
 
         try:
             self.init_kv_cache(
