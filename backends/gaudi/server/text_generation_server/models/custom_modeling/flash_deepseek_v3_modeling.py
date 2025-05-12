@@ -45,18 +45,13 @@ from text_generation_server.utils.weights import Weights
 
 def get_and_maybe_dequant_weights(layer: torch.nn.Module) -> torch.Tensor:
     if isinstance(layer, Fp8Linear):
-
-        def get_scales(layer: torch.nn.Module) -> torch.Tensor:
-            return layer.scale
-
-        scales = get_scales(layer)
-        if len(scales.shape) == 1:
-            ret = (layer.qweight.to(torch.bfloat16) * scales.unsqueeze(1)).to(
-                torch.bfloat16
-            )
-        else:
-            ret = (layer.qweight.to(torch.bfloat16) * scales).to(torch.bfloat16)
-        return ret
+        eye = torch.eye(
+            layer.qweight.shape[-1], dtype=torch.bfloat16, device=layer.qweight.device
+        )
+        dequant_weights = layer(eye)
+        del eye
+        # standardize to (output, input)
+        return dequant_weights.T
     return layer.weight
 
 
@@ -334,10 +329,40 @@ class DeepseekV3Attention(torch.nn.Module):
             q_proj = self.q_proj if self.q_lora_rank is None else self.q_b_proj
             query = q_proj(hidden_states_or_q_c)
             query = query.view(-1, self.num_heads, self.head_size)
-            _, query_pe = torch.split(
+            query_nope, query_pe = torch.split(
                 query, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
+        else:
+            query_nope, query_pe = self._q_proj_and_k_up_proj(hidden_states_or_q_c)
 
+        batch_size, heads, head_dim = query_pe.shape
+        query_pe = (
+            query_pe.view(batch_size, heads, head_dim // 2, 2)
+            .transpose(2, 3)
+            .reshape(batch_size, heads, head_dim)
+        )
+        batch_size, heads, head_dim = key_pe.shape
+        key_pe = (
+            key_pe.view(batch_size, heads, head_dim // 2, 2)
+            .transpose(2, 3)
+            .reshape(batch_size, heads, head_dim)
+        )
+        self.rotary_emb(query_pe, key_pe, cos, sin)
+        latent_vec_k = torch.concat(
+            (kv_c_normed, key_pe.view(-1, self.qk_rope_head_dim)), dim=-1
+        )
+        latent_vec_k = latent_vec_k.view(-1, self.qk_rope_head_dim + self.kv_lora_rank)
+
+        latent_vec_k = latent_vec_k.unflatten(0, (slots.size(0), -1))
+
+        kv_cache.store(
+            key=latent_vec_k,
+            value=None,
+            slots=slots,
+            kv_scales=self.kv_scales,
+        )
+
+        if cu_seqlen_prefill is not None:
             kv = self.kv_b_proj(kv_c_normed).view(
                 -1,
                 self.num_key_value_heads,
@@ -347,36 +372,6 @@ class DeepseekV3Attention(torch.nn.Module):
             key_nope, value = torch.split(
                 kv, [self.qk_nope_head_dim, self.value_head_size], dim=-1
             )
-
-            batch_size, heads, head_dim = query_pe.shape
-            query_pe = (
-                query_pe.view(batch_size, heads, head_dim // 2, 2)
-                .transpose(2, 3)
-                .reshape(batch_size, heads, head_dim)
-            )
-            batch_size, heads, head_dim = key_pe.shape
-            key_pe = (
-                key_pe.view(batch_size, heads, head_dim // 2, 2)
-                .transpose(2, 3)
-                .reshape(batch_size, heads, head_dim)
-            )
-            self.rotary_emb(query_pe, key_pe, cos, sin)
-            latent_vec_k = torch.concat(
-                (kv_c_normed, key_pe.view(-1, self.qk_rope_head_dim)), dim=-1
-            )
-            latent_vec_k = latent_vec_k.view(
-                -1, self.qk_rope_head_dim + self.kv_lora_rank
-            )
-
-            latent_vec_k = latent_vec_k.unflatten(0, (slots.size(0), -1))
-
-            kv_cache.store(
-                key=latent_vec_k,
-                value=None,
-                slots=slots,
-                kv_scales=self.kv_scales,
-            )
-
             query[..., self.qk_nope_head_dim :] = query_pe
             key = torch.empty_like(query)
             key[..., : self.qk_nope_head_dim] = key_nope
@@ -411,22 +406,6 @@ class DeepseekV3Attention(torch.nn.Module):
             )
         else:
             # Decode
-            query_nope, query_pe = self._q_proj_and_k_up_proj(hidden_states_or_q_c)
-            self.rotary_emb(query_pe, key_pe, cos, sin)
-            latent_vec_k = torch.concat(
-                (kv_c_normed, key_pe.view(-1, self.qk_rope_head_dim)), dim=-1
-            )
-            latent_vec_k = latent_vec_k.view(
-                -1, self.qk_rope_head_dim + self.kv_lora_rank
-            )
-
-            kv_cache.store(
-                key=latent_vec_k,
-                value=None,
-                slots=slots,
-                kv_scales=self.kv_scales,
-            )
-
             query = torch.cat([query_nope, query_pe], dim=-1)
             attn_output = paged_attention_mla(
                 query,
