@@ -69,7 +69,9 @@ from text_generation_server.utils.import_utils import (
     synchronize,
     get_free_memory,
 )
-
+from text_generation_server.utils.prefill_chunking import (
+    get_max_prefill_tokens,
+)
 import vllm_hpu_extension.environment as environment
 import habana_frameworks.torch as htorch
 import itertools
@@ -1589,7 +1591,7 @@ class FlashCausalLM(Model):
             self.kv_cache_dtype,
             self.device,
         )
-        self.max_batch_prefill_tokens = max_input_tokens * len(batch)
+        self.max_batch_prefill_tokens = get_max_prefill_tokens()
         max_num_seqs = int(os.getenv("MAX_BATCH_SIZE"))
         HPUBucketingContext = get_bucketing_context()
         max_total_tokens_aligned = math.ceil(max_total_tokens / BLOCK_SIZE) * BLOCK_SIZE
@@ -1606,7 +1608,7 @@ class FlashCausalLM(Model):
         max_blocks = max(
             BLOCK_SIZE, max_num_seqs * max_total_tokens_aligned // BLOCK_SIZE
         )
-        self.bucketing_ctx.num_hpu_blocks = max_blocks
+        self.bucketing_ctx.num_hpu_blocks = min(max_blocks, num_blocks)
         if os.getenv("VLLM_SKIP_WARMUP", "false").lower() == "true":
             self.bucketing_ctx.generate_prompt_buckets()
             self.bucketing_ctx.generate_decode_buckets(
@@ -1633,6 +1635,8 @@ class FlashCausalLM(Model):
         for i, (batch_size, seq_len) in enumerate(
             reversed(self.bucketing_ctx.prompt_buckets)
         ):
+            if batch_size * seq_len > self.max_batch_prefill_tokens:
+                continue
             log_master(logger.info, f"warmup prefill seq {seq_len} bs {batch_size}")
             for index in range(warmup_times):
                 self.warmup_prefill(seq_len, batch_size, batch)
