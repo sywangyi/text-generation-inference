@@ -1531,6 +1531,7 @@ class FlashCausalLM(Model):
             )
         else:
             cache_block_size = BLOCK_SIZE * self.num_kv_heads * self.head_size
+            cache_block_size = cache_block_size * 2
         total_cache_size = self.num_layers * cache_block_size * dtype_size
 
         try:
