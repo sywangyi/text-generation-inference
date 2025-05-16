@@ -485,7 +485,8 @@ class Mamba(Model):
                     logger.info(f"Cuda Graphs are enabled for sizes {CUDA_GRAPHS}")
                     # Warmup cuda graphs
                     for bs in CUDA_GRAPHS:
-                        self.cuda_graph_warmup(bs)
+                        if bs != 0:
+                            self.cuda_graph_warmup(bs)
                 except Exception:
                     logger.exception("Decode cuda graph warmup failed")
         else:

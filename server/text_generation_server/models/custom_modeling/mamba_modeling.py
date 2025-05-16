@@ -1,8 +1,18 @@
 import torch
 import torch.distributed
+from text_generation_server.utils.import_utils import SYSTEM
 
-from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+if SYSTEM != "ipex":
+    from mamba_ssm.ops.triton.selective_state_update import selective_state_update
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+    from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+else:
+    import intel_extension_for_pytorch as ipex
+
+    selective_state_update = ipex.llm.modules.MambaMixer.selective_state_update
+    selective_scan_fn = ipex.llm.modules.MambaMixer.selective_scan_fn
+    causal_conv1d_fn = ipex.llm.modules.MambaMixer.causal_conv1d_fn
+    causal_conv1d_update = ipex.llm.modules.MambaMixer.causal_conv1d_update
 from torch import nn
 from typing import Optional, Tuple, Any
 from transformers.configuration_utils import PretrainedConfig
@@ -16,7 +26,7 @@ from text_generation_server.layers import (
 from text_generation_server.layers.layernorm import FastRMSNorm
 
 from einops import rearrange
-from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+
 import math
 from dataclasses import dataclass
 
@@ -109,6 +119,8 @@ class MambaBlock(nn.Module):
             bias=self.conv1d.bias,
             activation=self.activation,
         )
+        if SYSTEM == "ipex":
+            x = x[0]
 
         # We're careful here about the layout, to avoid extra transposes.
         # We want dt to have d as the slowest moving dimension
