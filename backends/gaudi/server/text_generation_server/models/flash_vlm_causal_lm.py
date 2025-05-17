@@ -27,6 +27,8 @@ import time
 from text_generation_server.utils.import_utils import (
     synchronize,
 )
+import os
+from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
 tracer = trace.get_tracer(__name__)
 
@@ -441,6 +443,24 @@ class FlashVlmCausalLM(FlashCausalLM):
         )
 
     def warmup_hpu_graph(self, batch: FlashVlmCausalLMBatch):
+        prompt_graph_mem_ratio = float(os.environ.get("VLLM_GRAPH_PROMPT_RATIO", "0.3"))
+        free_mem = HabanaMemoryProfiler.current_free_device_memory()
+        graph_free_mem = free_mem - self.mem_reserved
+        graph_free_mem = self.align_workers(
+            graph_free_mem, torch.distributed.ReduceOp.MIN
+        )
+        prompt_available_memory = prompt_graph_mem_ratio * graph_free_mem
+        decode_available_memory = graph_free_mem - prompt_available_memory
+        msg = (
+            f"Using {format_bytes(graph_free_mem)}"
+            f"/{format_bytes(free_mem)} "
+            "of free device memory for HPUGraphs, "
+            f"{format_bytes(prompt_available_memory)} \
+                for prompt and "
+            f"{format_bytes(decode_available_memory)} for decode "
+            f"(VLLM_GRAPH_PROMPT_RATIO={prompt_graph_mem_ratio})"
+        )
+        log_master(logger.info, msg)
         start_time = time.time()
         warmup_shape_count = 0
         warmup_times = 3
@@ -453,16 +473,32 @@ class FlashVlmCausalLM(FlashCausalLM):
         buckets = list(
             sorted(self.bucketing_ctx.decode_buckets, key=ordering_function_max_bs)
         )
+        total_batch_seq = 0
+        total_mem = 0
+        available_mem = decode_available_memory
         for i, (batch_size, block_num) in enumerate(buckets):
             if batch_size > block_num:
                 continue
+            # Graph memory usage is proportional to seq dimension in a batch
+            batch_seq = batch_size
+            mem_estimate = batch_seq / total_batch_seq * total_mem
+            if not mem_estimate >= available_mem:
+                graphed_bucket = (batch_size, block_num, False)
+                if graphed_bucket not in self.graphed_buckets:
+                    self.graphed_buckets.add(graphed_bucket)
             warmup_shape_count += 1
-            log_master(
-                logger.info, f"warmup decode bs {batch_size} block_num {block_num}"
+            self.log_warmup("Decode", i, len(buckets), batch_size, block_num)
+            with HabanaMemoryProfiler() as mem_prof:
+                for index in range(warmup_times):
+                    self.warmup_decode(batch_size, block_num, batch)
+                    synchronize(self.device)
+            used_mem = self.align_workers(
+                mem_prof.consumed_device_memory, torch.distributed.ReduceOp.MAX
             )
-            for index in range(warmup_times):
-                self.warmup_decode(batch_size, block_num, batch)
-                synchronize(self.device)
+            available_mem -= used_mem
+            total_mem += used_mem
+            total_batch_seq += batch_seq
+
         log_master(
             logger.info,
             f"warmup hpu graph time {int(time.time() - start_time)}s warmup shape count {warmup_shape_count}",
@@ -539,8 +575,15 @@ class FlashVlmCausalLM(FlashCausalLM):
 
         kwargs = {}
         if htorch.utils.internal.is_lazy():
-            kwargs["bypass_hpu_graphs"] = batch.prefilling
-
+            batch_size = input_lengths.shape[0]
+            seqlen = (
+                input_ids.shape[0] // batch_size
+                if batch.prefilling
+                else batch.hpu_attn_meta.block_list.shape[0]
+            )
+            kwargs["bypass_hpu_graphs"] = not self.use_graphs(
+                batch.prefilling, seqlen, batch_size
+            )
         if batch.prefill_cache_indices is not None:
             slots_pad = torch.zeros_like(input_ids)
             slots_pad[batch.prefill_cache_indices] = slots
