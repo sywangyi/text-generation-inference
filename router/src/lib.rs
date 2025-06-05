@@ -210,7 +210,7 @@ pub struct Llama4Processor {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct HubProcessorConfig {
     pub chat_template: Option<ChatTemplateVersions>,
-    pub image_seq_len: usize,
+    pub image_seq_len: Option<usize>,
     pub processor_class: Option<String>,
 }
 
