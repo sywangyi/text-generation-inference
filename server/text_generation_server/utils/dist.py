@@ -74,6 +74,8 @@ def initialize_torch_distributed():
                 import intel_extension_for_pytorch as ipex
 
                 if torch.xpu.is_available():
+                    import oneccl_bindings_for_pytorch  # noqa: F401
+
                     assert (
                         WORLD_SIZE <= torch.xpu.device_count()
                     ), "Each process is one xpu"
