@@ -1008,7 +1008,7 @@ impl ChatRequest {
         Ok((
             GenerateRequest {
                 inputs: inputs.to_string(),
-                add_special_tokens: false,
+                add_special_tokens: infer.chat_template.is_none(),
                 parameters: GenerateParameters {
                     best_of: None,
                     temperature,
